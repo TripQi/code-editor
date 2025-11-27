@@ -39,6 +39,8 @@ uv run python server.py
 
 ### MCP 工具（code-editor）
 
+#### 文件系统工具
+
 | 工具 | 功能 | 主要参数/说明 | 常见误用 |
 | --- | --- | --- | --- |
 | `set_root_path(root_path)` | 切换根并加入白名单 | 目录必须存在；切根会影响后续全局 root；可先看 `list_allowed_roots` | 传不存在/非目录路径；忽略切根副作用 |
@@ -52,6 +54,11 @@ uv run python server.py
 | `move_file(source_path, destination_path, expected_mtime=None)` | 移动/重命名 | 目标不能存在；跨根会把全局 root 切到目标 | 忽略切根副作用；目标已存在 |
 | `copy_file(source_path, destination_path, expected_mtime=None)` | 复制文件 | 源必须是文件；目标不存在；跨根切到目标 | 源是目录；目标已存在 |
 | `delete_directory(directory_path, expected_mtime=None)` | 递归删目录 | 禁删当前根/祖先/关键目录；必须是目录 | 传文件；试图删根或系统目录 |
+
+#### 代码精准编辑工具
+
+| 工具 | 功能 | 主要参数/说明 | 常见误用 |
+| --- | --- | --- | --- |
 | `edit_lines(file_path, start_line, end_line, new_content, expected_mtime=None, encoding="utf-8")` | 按行替换 | 1-based 闭区间；行越界抛错；乐观锁 | start/end 反向；越界 |
 | `insert_at_line(file_path, line_number, content, expected_mtime=None, encoding="utf-8")` | 插入行 | line_number>=0；乐观锁 | 行号越界 |
 | `edit_block(file_path, old_string, new_string, expected_replacements=1, expected_mtime=None)` | 精确替换，行尾规范化 | 计数不符/空搜索/仅模糊命中会抛异常；乐观锁 | 期望计数错；指望模糊自动替换 |

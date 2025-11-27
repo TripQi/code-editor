@@ -1,6 +1,6 @@
 [project]
 name = "code-editor-mcp"
-version = "0.1.0"
+version = "0.1.3"
 description = "Code editor MCP server with sandboxing, optimistic locking, and path whitelists."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,7 +32,7 @@ code-editor = "server:server.run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tools"]
-include = ["server.py", "main.py"]
+force-include = {"server.py" = "server.py", "main.py" = "main.py"}
 
 [tool.hatch.build.targets.sdist]
 include = ["server.py", "main.py", "tools", "README.md", "LICENSE", "pyproject.toml"]
