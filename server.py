@@ -502,6 +502,26 @@ def apply_unified_diff(
     encoding: str = "utf-8",
     expected_mtime: float | None = None,
 ) -> str:
+    """
+    Apply a unified diff string to a file.
+
+    Usage notes:
+    - diff_content must be a standard unified diff with file headers (`--- a/…`, `+++ b/…`) and hunk headers.
+    - Paths are relative to CODE_EDIT_ROOT; keep `a/` and `b/` prefixes consistent with file_path.
+    - Hunk header format: @@ -<old_start>,<old_count> +<new_start>,<new_count> @@ with lines prefixed by space (context), `-` (remove), `+` (add).
+    - Each hunk needs at least one context/change line and hunks must follow file order.
+    - Use `\n` newlines and UTF-8 encoding.
+
+    Minimal example:
+    diff = \"\"\"--- a/README.md
+    +++ b/README.md
+    @@ -1,2 +1,3 @@
+     Line1
+    +Line2
+     Line3
+    \"\"\"
+    apply_unified_diff(file_path="README.md", diff_content=diff)
+    """
     resolved = _validate_path(file_path)
     if not resolved.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
