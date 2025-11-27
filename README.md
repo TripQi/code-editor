@@ -1,12 +1,17 @@
-## code-editor-mcp
+## code-editor
 
 面向多客户端并发、安全沙箱、编码感知的代码编辑 MCP 服务器。与 `code-index-mcp` 搭配：索引/导航交给 index，精读精写、补丁和路径切换交给本服务。
 
-### 运行
+### 安装与运行
 ```bash
-# 安装依赖（推荐 uv）
+# 安装（pip 或 uv 均可，包名 code-editor-mcp）
+pip install code-editor-mcp         # 或 uv pip install code-editor-mcp
+
+# 直接启动 CLI 入口
+code-editor
+
+# 若从源码运行
 uv sync
-# 运行服务
 uv run python server.py
 ```
 
@@ -14,6 +19,16 @@ uv run python server.py
 - `CODE_EDIT_ROOT`：初始根目录（默认启动时的 CWD）。
 - `CODE_EDIT_ALLOWED_ROOTS_FILE`：白名单持久化 JSON，默认 `tools/.code_edit_roots.json`。
 - `CODE_EDIT_ALLOWED_ROOTS`：逗号分隔额外白名单。
+
+环境变量一览：
+
+| 变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `CODE_EDIT_ROOT` | 启动根目录 | 当前工作目录 |
+| `CODE_EDIT_ALLOWED_ROOTS_FILE` | 白名单持久化文件 | `tools/.code_edit_roots.json` |
+| `CODE_EDIT_ALLOWED_ROOTS` | 额外白名单（逗号分隔） | 空 |
+| `CODE_EDIT_FILE_READ_LINE_LIMIT` | `read_file` 最大行数 | 1000 |
+| `CODE_EDIT_FILE_WRITE_LINE_LIMIT` | `write_file` 行数警戒 | 50 |
 
 ### 设计要点
 - 根隔离 + 自动切根：路径必须在当前根内；若落在白名单其他根，自动切换再执行，避免客户端重试。
@@ -49,8 +64,22 @@ uv run python server.py
 - 精确替换：`edit_block("src/app.py", "old", "new", expected_replacements=1, expected_mtime=info["modified"])`。
 - 列目录（扁平）：`list_directory(".", format="flat", ignore_patterns=[".git", "node_modules"])`。
 
+### MCP 客户端快速配置示例
+
+```json
+{
+  "mcpServers": {
+    "code-editor": {
+      "command": "code-editor",
+      "env": {
+        "CODE_EDIT_ROOT": "C:\\\\Projects\\\\repo"
+      }
+    }
+  }
+}
+```
+
 ### 安全/行为提示
 - 路径验证：所有操作都要求在当前根内；若路径属于白名单其他根，会自动切根后执行，否则抛错。
 - 删除防护：`delete_directory` 拒绝删除当前 root、其祖先和关键系统目录（/ /home /root /Users C:\\）。
 - 跨根副作用：copy/move 到其他根后，全局 root 停留在目标根，后续操作以新根为准，如需恢复请显式 `set_root_path`。
-
