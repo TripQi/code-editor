@@ -183,16 +183,16 @@ def _apply_hunks(original_lines: List[str], diff_lines: List[str]) -> List[str]:
 @server.tool()
 def set_root_path(root_path: str) -> str:
     """
-    Switch CODE_EDIT_ROOT to an allowed directory (persisting to whitelist).
+    Add/activate an allowed directory and set it as the base for resolving relative paths.
 
-    Tips:
-    - Call list_allowed_roots first; if the target is already whitelisted you may skip set_root_path.
+    Notes:
+    - Call list_allowed_roots first; if the target is already listed you may skip set_root_path.
     - Path must exist and be a directory; otherwise raises FileNotFoundError/NotADirectoryError.
-    - Cutting over changes global root; if you need to go back, call set_root_path with the prior root.
+    - Access control is enforced by the allowed directory list, not by the active base path.
     """
     global ROOT
     ROOT = fs_tools.set_root_path(root_path)
-    return f"CODE_EDIT_ROOT set to {ROOT}"
+    return f"Active base path set to {ROOT}"
 
 
 @server.tool()
@@ -223,8 +223,8 @@ def read_file(file_path: str, offset: int = 0, length: int | None = None) -> dic
 
     - offset < 0 reads last |offset| lines; offset >= 0 reads from that line.
     - length is max lines to return; omit for default limit.
-    - If path is in another allowed root, the server auto-switches root before reading.
-    Common mistakes: passing URLs, non-integer offsets/length, or paths outside the whitelist.
+    - Paths must be within the allowed directories list; use set_root_path to add bases for relative paths.
+    Common mistakes: passing URLs, non-integer offsets/length, or paths outside the allowed directories.
     """
     return fs_tools.read_file(file_path, offset, length)
 
@@ -285,7 +285,7 @@ def write_file(
     Write or append to a file.
     - mode: "rewrite"/"write" to overwrite, "append" to add.
     - expected_mtime: optional optimistic lock; mismatch raises.
-    - Auto-switches root if path is in allowed roots.
+    - Paths must be within allowed directories; set_root_path only changes the base for relative resolution.
     Common mistakes: mode values like "w"/"replace"; stale expected_mtime.
     """
     normalized_mode = "rewrite" if mode in {"rewrite", "write"} else mode
@@ -300,7 +300,7 @@ def delete_file(file_path: str, expected_mtime: float | None = None) -> str:
     """
     Delete a file with optional optimistic lock.
     - Not for directories.
-    - Auto-switches root if needed; will raise if path not whitelisted.
+    - Paths must be inside allowed directories; set_root_path only affects relative resolution.
     - expected_mtime protects against concurrent edits.
     """
     resolved = _validate_path(file_path)
@@ -323,7 +323,7 @@ def move_file(
     Move a file or directory.
     - Destination must not already exist.
     - expected_mtime checks the source before move.
-    - Cross-root moves auto-switch root to destination; global root will stay there afterward.
+    - Paths must be within allowed directories; set_root_path controls the base for resolving relatives.
     """
     fs_tools.move_file(source_path, destination_path, expected_mtime)
     return f"Moved {source_path} to {destination_path}."
@@ -339,7 +339,7 @@ def copy_file(
     Copy a file.
     - Source must be a file; destination must not exist.
     - expected_mtime checks the source before copy.
-    - Cross-root copies auto-switch root to destination; global root will stay there afterward.
+    - Paths must be within allowed directories; set_root_path controls the base for resolving relatives.
     """
     source = _validate_path(source_path)
     dest = _validate_path(destination_path)
@@ -507,7 +507,7 @@ def apply_unified_diff(
 
     Usage notes:
     - diff_content must be a standard unified diff with file headers (`--- a/…`, `+++ b/…`) and hunk headers.
-    - Paths are relative to CODE_EDIT_ROOT; keep `a/` and `b/` prefixes consistent with file_path.
+    - Paths are resolved relative to the active base path from set_root_path before allowed-directory checks; keep `a/` and `b/` prefixes consistent with file_path.
     - Hunk header format: @@ -<old_start>,<old_count> +<new_start>,<new_count> @@ with lines prefixed by space (context), `-` (remove), `+` (add).
     - Each hunk needs at least one context/change line and hunks must follow file order.
     - Use `\n` newlines and UTF-8 encoding.

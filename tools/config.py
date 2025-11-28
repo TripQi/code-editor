@@ -35,11 +35,21 @@ ALLOWED_ROOTS_FILE = Path(
 
 
 def get_root() -> Path:
+    """
+    Active base for resolving relative paths. No longer used as an access
+    control boundary; access is governed by allowed directories.
+    """
     return Path(os.environ.get("CODE_EDIT_ROOT", Path.cwd())).expanduser().resolve()
 
 
 def _load_env_allowed_roots() -> List[Path]:
-    raw = os.environ.get("CODE_EDIT_ALLOWED_ROOTS")
+    """
+    Support both legacy CODE_EDIT_ALLOWED_ROOTS and new CODE_EDIT_ALLOWED_DIRECTORIES
+    environment variables.
+    """
+    raw = os.environ.get("CODE_EDIT_ALLOWED_DIRECTORIES") or os.environ.get(
+        "CODE_EDIT_ALLOWED_ROOTS"
+    )
     if not raw:
         return []
     parts = [p.strip() for p in raw.split(",") if p.strip()]
@@ -64,11 +74,20 @@ def _load_file_allowed_roots() -> List[Path]:
 
 def get_allowed_roots() -> List[Path]:
     """
-    Combine current root, env-provided roots, and persisted JSON whitelist.
+    Return the directories allowed for file access.
+
+    Semantics match desktop-commander's allowedDirectories:
+    - Default to the user's home directory when nothing is configured (and persist it).
+    - If the list is empty or contains a filesystem root ("/" on POSIX), treat as unrestricted.
     """
-    roots = {get_root()}
-    roots.update(_load_env_allowed_roots())
-    roots.update(_load_file_allowed_roots())
+    roots = set(_load_env_allowed_roots() + _load_file_allowed_roots())
+
+    # Default to home if nothing configured
+    if not roots:
+        default_home = Path.home().expanduser().resolve()
+        roots.add(default_home)
+        save_allowed_roots([default_home])
+
     return sorted(roots)
 
 
@@ -79,13 +98,6 @@ def save_allowed_roots(roots: List[Path]) -> None:
         json.dumps([str(p) for p in normalized], indent=2),
         encoding="utf-8",
     )
-
-
-def add_allowed_root(root_path: Path) -> List[Path]:
-    roots = set(get_allowed_roots())
-    roots.add(root_path.expanduser().resolve())
-    save_allowed_roots(sorted(roots))
-    return sorted(roots)
 
 
 def list_allowed_roots() -> List[Path]:

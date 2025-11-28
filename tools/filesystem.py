@@ -11,12 +11,12 @@ from .config import (
     FILE_OPERATION_TIMEOUTS,
     FILE_SIZE_LIMITS,
     READ_PERFORMANCE_THRESHOLDS,
-    add_allowed_root,
     get_allowed_roots,
     list_allowed_roots,
     get_file_read_line_limit,
     get_file_write_line_limit,
     get_root,
+    save_allowed_roots,
 )
 from .mime_utils import get_mime_type, is_image_file
 from .timeouts import with_timeout
@@ -35,13 +35,22 @@ def set_root_path(root_path: str) -> Path:
         raise FileNotFoundError(f"Root path not found: {root_path}")
     if not candidate.is_dir():
         raise NotADirectoryError(f"Root path is not a directory: {root_path}")
-    allowed_roots = add_allowed_root(candidate)
+
+    roots = get_allowed_roots()
+
+    # If an existing allowed dir already covers this candidate, skip persistence (avoid redundancy)
+    for r in roots:
+        if candidate == r or _is_relative_to(candidate, r):
+            os.environ["CODE_EDIT_ROOT"] = str(candidate)
+            return candidate
+
+    # If this candidate is a parent of existing entries, replace them with the parent to keep list minimal
+    pruned = [r for r in roots if not _is_relative_to(r, candidate)]
+    pruned.append(candidate)
+    save_allowed_roots(pruned)
+
     os.environ["CODE_EDIT_ROOT"] = str(candidate)
     return candidate
-
-
-def _normalize_path(p: Path) -> Path:
-    return p.expanduser().resolve()
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:
@@ -52,29 +61,37 @@ def _is_relative_to(path: Path, base: Path) -> bool:
         return False
 
 
-def _find_allowed_root_for_path(path: Path) -> Path | None:
-    for allowed in get_allowed_roots():
+def _is_drive_root(p: Path) -> bool:
+    return p == Path(p.anchor)
+
+
+def _is_unrestricted(roots: List[Path]) -> bool:
+    return not roots or any(str(p) == "/" for p in roots)
+
+
+def _is_path_allowed(path: Path, allowed_roots: List[Path]) -> bool:
+    if _is_unrestricted(allowed_roots):
+        return True
+    for allowed in allowed_roots:
+        if _is_drive_root(allowed) and allowed.drive and path.drive.lower() == allowed.drive.lower():
+            return True
         if _is_relative_to(path, allowed) or path == allowed:
-            return allowed
-    return None
+            return True
+    return False
 
 
 def validate_path(requested_path: str | Path) -> Path:
-    root = get_root()
+    allowed_roots = get_allowed_roots()
     expanded = Path(requested_path).expanduser()
-    absolute = expanded if expanded.is_absolute() else (root / expanded)
+    base = get_root()
+    absolute = expanded if expanded.is_absolute() else (base / expanded)
     absolute = absolute.resolve()
 
-    if not _is_relative_to(absolute, root) and absolute != root:
-        allowed_root = _find_allowed_root_for_path(absolute)
-        if allowed_root and allowed_root != root:
-            # Switch root transparently within MCP to avoid caller retries.
-            set_root_path(str(allowed_root))
-            root = allowed_root
-            absolute = expanded if expanded.is_absolute() else (root / expanded)
-            absolute = absolute.resolve()
-        else:
-            raise ValueError(f"Path not allowed: {requested_path}. Must stay within allowed roots.")
+    if not _is_path_allowed(absolute, allowed_roots):
+        allowed_display = ", ".join(str(p) for p in allowed_roots) if allowed_roots else "unrestricted"
+        raise ValueError(
+            f"Path not allowed: {requested_path}. Must be within one of these directories: {allowed_display}"
+        )
 
     return absolute
 
