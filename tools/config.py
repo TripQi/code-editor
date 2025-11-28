@@ -26,6 +26,17 @@ READ_PERFORMANCE_THRESHOLDS = {
 
 DEFAULT_FILE_READ_LINE_LIMIT = 1000
 DEFAULT_FILE_WRITE_LINE_LIMIT = 50
+DEFAULT_IGNORE_PATTERNS = [
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".DS_Store",
+    ".env",
+    ".env.*",
+    ".venv",
+    "*.log",
+    "*.pem",
+]
 ALLOWED_ROOTS_FILE = Path(
     os.environ.get(
         "CODE_EDIT_ALLOWED_ROOTS_FILE",

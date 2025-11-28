@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 from datetime import datetime
 from fnmatch import fnmatch
@@ -12,12 +11,11 @@ from typing import List
 from mcp.server.fastmcp import FastMCP
 from tools import edit as edit_tools
 from tools import filesystem as fs_tools
+from tools.config import DEFAULT_IGNORE_PATTERNS
 
 logging.basicConfig(level=logging.INFO)
 
-HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-MTIME_EPSILON = 0.01
-DEFAULT_IGNORE_PATTERNS = [".git", "__pycache__", "node_modules", ".DS_Store"]
+MTIME_EPSILON_NS = 10_000_000  # 10ms tolerance
 
 server = FastMCP("code-editor")
 ROOT = fs_tools.get_root()
@@ -41,10 +39,11 @@ def _check_expected_mtime(resolved: Path, expected_mtime: float | None) -> None:
         return
     if not resolved.exists():
         raise FileNotFoundError(f"File not found for mtime check: {resolved}")
-    current = resolved.stat().st_mtime
-    if abs(current - expected_mtime) > MTIME_EPSILON:
+    expected_ns = _normalize_expected_mtime(expected_mtime)
+    current_ns = _current_mtime_ns(resolved)
+    if expected_ns is not None and abs(current_ns - expected_ns) > MTIME_EPSILON_NS:
         raise RuntimeError(
-            f"Conflict: File modified by another process. Expected mtime {expected_mtime}, got {current}."
+            f"Conflict: File modified by another process. Expected mtime {expected_mtime}, got {current_ns / 1_000_000_000:.9f}."
         )
 
 
@@ -53,11 +52,24 @@ def _read_lines(file_path: Path, encoding: str) -> List[str]:
 
 
 def _write_text(file_path: Path, content: str, encoding: str) -> None:
-    file_path.write_text(content, encoding=encoding)
+    fs_tools._atomic_write(file_path, content, encoding=encoding)
 
 
 def _read_text(file_path: Path, encoding: str) -> str:
     return file_path.read_text(encoding=encoding)
+
+
+def _normalize_expected_mtime(expected: float | int | None) -> int | None:
+    if expected is None:
+        return None
+    if expected > 1e12:  # assume nanoseconds
+        return int(expected)
+    return int(expected * 1_000_000_000)
+
+
+def _current_mtime_ns(path: Path) -> int:
+    stats = path.stat()
+    return getattr(stats, "st_mtime_ns", int(stats.st_mtime * 1_000_000_000))
 
 
 def _index_to_line_col(text: str, index: int) -> tuple[int, int]:
@@ -68,114 +80,23 @@ def _index_to_line_col(text: str, index: int) -> tuple[int, int]:
 
 
 def _normalize_ignore_patterns(patterns: List[str] | str | None) -> List[str]:
+    """
+    Normalize user-supplied ignore patterns.
+
+    Rules:
+    - None: fall back to defaults.
+    - Empty string/list: disable defaults entirely (show everything).
+    - Non-string entries: reject.
+    """
     if patterns is None:
         return list(DEFAULT_IGNORE_PATTERNS)
     if isinstance(patterns, str):
         cleaned = [p.strip() for p in patterns.split(",") if p.strip()]
-        return cleaned or list(DEFAULT_IGNORE_PATTERNS)
+        return cleaned  # empty string means “no ignores”
     items = list(patterns)
-    if not items:
-        return list(DEFAULT_IGNORE_PATTERNS)
     if any(not isinstance(p, str) for p in items):
         raise ValueError("ignore_patterns elements must all be strings.")
-    return items
-
-
-def _summarize_hunks(diff_lines: List[str]) -> list[str]:
-    summaries: list[str] = []
-    hunk_no = 0
-    for line in diff_lines:
-        if not line.startswith("@@"):
-            continue
-        match = HUNK_HEADER_RE.match(line)
-        if not match:
-            continue
-        hunk_no += 1
-        old_start = int(match.group(1))
-        old_len = int(match.group(2) or "1")
-        new_start = int(match.group(3))
-        new_len = int(match.group(4) or "1")
-        old_end = old_start + max(old_len, 1) - 1
-        new_end = new_start + max(new_len, 1) - 1
-        summaries.append(f"#{hunk_no} -{old_start}-{old_end} -> +{new_start}-{new_end}")
-    return summaries
-
-
-def _apply_hunks(original_lines: List[str], diff_lines: List[str]) -> List[str]:
-    new_lines: List[str] = []
-    old_index = 0
-    hunk_no = 0
-    i = 0
-
-    while i < len(diff_lines):
-        line = diff_lines[i]
-        if not line.startswith("@@"):
-            i += 1
-            continue
-
-        match = HUNK_HEADER_RE.match(line)
-        if not match:
-            raise RuntimeError(f"Patch failed: invalid hunk header at line {i + 1}.")
-
-        hunk_no += 1
-        old_start = int(match.group(1))
-        old_len = int(match.group(2) or "1")
-        new_start = int(match.group(3))
-        new_len = int(match.group(4) or "1")
-
-        expected_old_index = old_start - 1
-        if expected_old_index < old_index:
-            raise RuntimeError(f"Patch failed: overlapping hunks near hunk #{hunk_no}.")
-
-        new_lines.extend(original_lines[old_index:expected_old_index])
-        old_index = expected_old_index
-        i += 1
-        hunk_old_consumed = 0
-        hunk_new_produced = 0
-
-        while i < len(diff_lines) and not diff_lines[i].startswith("@@"):
-            marker = diff_lines[i][:1]
-            text = diff_lines[i][1:]
-            if marker == " ":
-                if old_index >= len(original_lines):
-                    raise RuntimeError(f"Patch failed: context beyond EOF in hunk #{hunk_no}.")
-                if original_lines[old_index] != text:
-                    raise RuntimeError(
-                        f"Patch failed: Hunk #{hunk_no} context mismatch at original line {old_index + 1}."
-                    )
-                new_lines.append(original_lines[old_index])
-                old_index += 1
-                hunk_old_consumed += 1
-                hunk_new_produced += 1
-            elif marker == "-":
-                if old_index >= len(original_lines):
-                    raise RuntimeError(f"Patch failed: deletion beyond EOF in hunk #{hunk_no}.")
-                if original_lines[old_index] != text:
-                    raise RuntimeError(
-                        f"Patch failed: Hunk #{hunk_no} deletion mismatch at original line {old_index + 1}."
-                    )
-                old_index += 1
-                hunk_old_consumed += 1
-            elif marker == "+":
-                new_lines.append(text)
-                hunk_new_produced += 1
-            elif marker == "\\":
-                pass  # "\\ No newline" marker
-            else:
-                raise RuntimeError(f"Patch failed: invalid hunk line marker '{marker}' in hunk #{hunk_no}.")
-            i += 1
-
-        if hunk_old_consumed != old_len:
-            raise RuntimeError(
-                f"Patch failed: Hunk #{hunk_no} expected to consume {old_len} lines, got {hunk_old_consumed}."
-            )
-        if hunk_new_produced != new_len:
-            raise RuntimeError(
-                f"Patch failed: Hunk #{hunk_no} expected to produce {new_len} lines, got {hunk_new_produced}."
-            )
-
-    new_lines.extend(original_lines[old_index:])
-    return new_lines
+    return items  # empty list => show all files
 
 
 # --- Tools ---------------------------------------------------------------
@@ -259,10 +180,11 @@ def list_directory(
     if fmt not in {"tree", "flat"}:
         raise ValueError("format must be 'tree' or 'flat'")
 
-    if fmt == "tree":
-        return fs_tools.list_directory(str(resolved), depth)
-
     patterns = _normalize_ignore_patterns(ignore_patterns)
+
+    if fmt == "tree":
+        return fs_tools.list_directory(str(resolved), depth, patterns)
+
     entries = []
     for entry in sorted(resolved.iterdir(), key=lambda p: p.name):
         if any(fnmatch(entry.name, pat) for pat in patterns):
@@ -389,11 +311,14 @@ def replace_string(
     search_string: str,
     replace_string: str,
     expected_mtime: float | None = None,
+    ignore_whitespace: bool = False,
+    normalize_escapes: bool = False,
 ) -> str:
     """
     Backward-compatible single replacement with optimistic lock.
     - Same behavior as edit_block with expected_replacements=1.
     - Empty search or no match raises; fuzzy-only matches raise.
+    - normalize_escapes optionally unescapes \"\\n\", \"\\t\", \"\\\"\", \"\\\\\" in the search string to match literal text.
     """
     # Backward-compatible alias to edit_block with single replacement and mtime protection.
     return edit_tools.perform_search_replace(
@@ -402,6 +327,8 @@ def replace_string(
         replace_string,
         expected_replacements=1,
         expected_mtime=expected_mtime,
+        ignore_whitespace=ignore_whitespace,
+        normalize_escapes=normalize_escapes,
     )
 
 
@@ -479,12 +406,16 @@ def edit_block(
     new_string: str,
     expected_replacements: int = 1,
     expected_mtime: float | None = None,
+    ignore_whitespace: bool = False,
+    normalize_escapes: bool = False,
 ) -> str:
     """
     Precise search/replace with line-ending normalization and optimistic lock.
     - expected_replacements enforces exact match count.
     - Empty search raises; fuzzy-only matches raise with diff guidance.
     - expected_mtime protects against concurrent edits.
+    - ignore_whitespace allows whitespace-insensitive matching (collapses whitespace to \\s+).
+    - normalize_escapes best-effort unescapes \"\\n\", \"\\t\", \"\\\"\", \"\\\\\" in the search string; keep off unless你的搜索串是转义文本。
     """
     return edit_tools.perform_search_replace(
         file_path,
@@ -492,55 +423,9 @@ def edit_block(
         new_string,
         expected_replacements=expected_replacements,
         expected_mtime=expected_mtime,
+        ignore_whitespace=ignore_whitespace,
+        normalize_escapes=normalize_escapes,
     )
-
-
-@server.tool()
-def apply_unified_diff(
-    file_path: str,
-    diff_content: str,
-    encoding: str = "utf-8",
-    expected_mtime: float | None = None,
-) -> str:
-    """
-    Apply a unified diff string to a file.
-
-    Usage notes:
-    - diff_content must be a standard unified diff with file headers (`--- a/…`, `+++ b/…`) and hunk headers.
-    - Paths are resolved relative to the active base path from set_root_path before allowed-directory checks; keep `a/` and `b/` prefixes consistent with file_path.
-    - Hunk header format: @@ -<old_start>,<old_count> +<new_start>,<new_count> @@ with lines prefixed by space (context), `-` (remove), `+` (add).
-    - Each hunk needs at least one context/change line and hunks must follow file order.
-    - Use `\n` newlines and UTF-8 encoding.
-
-    Minimal example:
-    diff = \"\"\"--- a/README.md
-    +++ b/README.md
-    @@ -1,2 +1,3 @@
-     Line1
-    +Line2
-     Line3
-    \"\"\"
-    apply_unified_diff(file_path="README.md", diff_content=diff)
-    """
-    resolved = _validate_path(file_path)
-    if not resolved.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    if not resolved.is_file():
-        raise IsADirectoryError(f"Not a file: {file_path}")
-
-    _check_expected_mtime(resolved, expected_mtime)
-    original_lines = _read_lines(resolved, encoding)
-    diff_lines = diff_content.splitlines(keepends=True)
-
-    if not any(line.startswith("@@") for line in diff_lines):
-        raise RuntimeError("Patch failed: no hunk headers found.")
-
-    updated_lines = _apply_hunks(original_lines, diff_lines)
-    _write_text(resolved, "".join(updated_lines), encoding)
-    summaries = _summarize_hunks(diff_lines)
-    summary_text = "; ".join(summaries) if summaries else "No hunks summarized."
-    return f"Patch applied to {file_path}. Hunks: {summary_text}"
-
 
 if __name__ == "__main__":
     server.run()

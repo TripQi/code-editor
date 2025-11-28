@@ -35,7 +35,8 @@ uv run python server.py
 ### 设计要点
 - 允许目录列表：默认允许用户主目录；路径需落在允许目录内，否则拒绝。`set_root_path` 仅将目录加入允许列表并设置相对基准，不自动切换执行。
 - 持久允许目录：`set_root_path` 成功后写入 JSON，可跨会话复用。
-- 乐观锁：写/删类支持 `expected_mtime`，防止并发覆盖。
+- 乐观锁：写/删类支持秒或纳秒级 `expected_mtime`，10ms 容忍；写入走原子写避免部分落盘。
+- 默认忽略：`.git`、`__pycache__`、`node_modules`、`.DS_Store`、`.env*`、`.venv`、`*.log`、`*.pem`；`ignore_patterns` 传空字符串/空列表可关闭默认忽略。
 - 编码感知：默认 UTF-8，读写失败请尝试 `encoding='gbk'` 等。
 - 安全删除：禁止删除当前根/其祖先/关键系统目录。
 
@@ -43,29 +44,28 @@ uv run python server.py
 
 #### 文件系统工具
 
-| 工具 | 功能 | 主要参数/说明 | 常见误用 |
-| --- | --- | --- | --- |
-| `set_root_path(root_path)` | 加入允许目录并设置相对路径基准 | 目录必须存在；更新 CODE_EDIT_ROOT 相对基准；可先看 `list_allowed_roots` | 传不存在/非目录路径；未先将目录加入允许列表 |
-| `list_allowed_roots()` | 返回当前允许目录列表 | 合并环境变量与持久化 JSON | 以为会调整 CODE_EDIT_ROOT（不会） |
-| `get_file_info(file_path)` | stat 信息（小文件含行数等） | 路径可为文件/目录；需在允许目录内 | 假设一定返回行数（大文件不会） |
-| `read_file(file_path, offset=0, length=None)` | 流式读取文本/图片 | offset<0 读尾部行，offset>=0 读指定行开始；length 为最大行数 | 传 URL；非整数 offset/length；不在允许目录 |
-| `create_directory(dir_path)` | 递归建目录 | 需在允许目录内 | 传文件路径 |
-| `list_directory(dir_path, depth=2, format="tree"|"flat", ignore_patterns=None)` | 列目录 | tree 返回字符串列表；flat 返回字典列表，支持忽略模式 | 用不支持的 format；depth<=0；ignore_patterns 非字符串列表 |
-| `write_file(file_path, content, mode="rewrite"/"write"/"append", expected_mtime=None)` | 覆盖/追加写入 | 非法 mode 抛错；expected_mtime 乐观锁 | `mode="w"`/`"replace"`；mtime 过期 |
-| `delete_file(file_path, expected_mtime=None)` | 删文件 | 仅文件；乐观锁；需在允许目录内 | 目标是目录 |
-| `move_file(source_path, destination_path, expected_mtime=None)` | 移动/重命名 | 目标不能存在；相对路径基准由当前 CODE_EDIT_ROOT 决定 | 未先调整相对基准；目标已存在 |
-| `copy_file(source_path, destination_path, expected_mtime=None)` | 复制文件 | 源必须是文件；目标不存在；相对路径基准由当前 CODE_EDIT_ROOT 决定 | 源是目录；目标已存在 |
-| `delete_directory(directory_path, expected_mtime=None)` | 递归删目录 | 禁删当前根/祖先/关键目录；必须是目录 | 传文件；试图删根或系统目录 |
+| 名称 | 工具 | 功能 | 主要参数/说明 | 常见误用 |
+| --- | --- | --- | --- | --- |
+| `set_root_path` | `set_root_path(root_path)` | 加入允许目录并设置相对路径基准 | 目录必须存在；更新 CODE_EDIT_ROOT 相对基准；可先看 `list_allowed_roots` | 传不存在/非目录路径；未先将目录加入允许列表 |
+| `list_allowed_roots` | `list_allowed_roots()` | 返回当前允许目录列表 | 合并环境变量与持久化 JSON | 以为会调整 CODE_EDIT_ROOT（不会） |
+| `get_file_info` | `get_file_info(file_path)` | stat 信息（小文件含行数等） | 路径可为文件/目录；需在允许目录内 | 假设一定返回行数（大文件不会） |
+| `read_file` | `read_file(file_path, offset=0, length=None)` | 流式读取文本/图片 | offset<0 读尾部行，offset>=0 读指定行开始；length 为最大行数 | 传 URL；非整数 offset/length；不在允许目录 |
+| `create_directory` | `create_directory(dir_path)` | 递归建目录 | 需在允许目录内 | 传文件路径 |
+| `list_directory` | `list_directory(dir_path, depth=2, format="tree"|"flat", ignore_patterns=None)` | 列目录 | tree 返回字符串列表；flat 返回字典列表；`ignore_patterns` 默认为内置列表，传空字符串/空列表关闭忽略；支持 fnmatch | 用不支持的 format；depth<=0；ignore_patterns 非字符串列表 |
+| `write_file` | `write_file(file_path, content, mode="rewrite"/"write"/"append", expected_mtime=None)` | 覆盖/追加写入 | 非法 mode 抛错；expected_mtime 乐观锁；rewrite 走原子写 | `mode="w"`/`"replace"`；mtime 过期 |
+| `delete_file` | `delete_file(file_path, expected_mtime=None)` | 删文件 | 仅文件；乐观锁；需在允许目录内 | 目标是目录 |
+| `move_file` | `move_file(source_path, destination_path, expected_mtime=None)` | 移动/重命名 | 目标不能存在；相对路径基准由当前 CODE_EDIT_ROOT 决定 | 未先调整相对基准；目标已存在 |
+| `copy_file` | `copy_file(source_path, destination_path, expected_mtime=None)` | 复制文件 | 源必须是文件；目标不存在；相对路径基准由当前 CODE_EDIT_ROOT 决定 | 源是目录；目标已存在 |
+| `delete_directory` | `delete_directory(directory_path, expected_mtime=None)` | 递归删目录 | 禁删当前根/祖先/关键目录；必须是目录 | 传文件；试图删根或系统目录 |
 
 #### 代码精准编辑工具
 
-| 工具 | 功能 | 主要参数/说明 | 常见误用 |
-| --- | --- | --- | --- |
-| `edit_lines(file_path, start_line, end_line, new_content, expected_mtime=None, encoding="utf-8")` | 按行替换 | 1-based 闭区间；行越界抛错；乐观锁 | start/end 反向；越界 |
-| `insert_at_line(file_path, line_number, content, expected_mtime=None, encoding="utf-8")` | 插入行 | line_number>=0；乐观锁 | 行号越界 |
-| `edit_block(file_path, old_string, new_string, expected_replacements=1, expected_mtime=None)` | 精确替换，行尾规范化 | 计数不符/空搜索/仅模糊命中会抛异常；乐观锁 | 期望计数错；指望模糊自动替换 |
-| `replace_string(file_path, search_string, replace_string, expected_mtime=None)` | 兼容单次替换包装 | 等价 `edit_block(..., expected_replacements=1)` | 空搜索；多处命中 |
-| `apply_unified_diff(file_path, diff_content, encoding="utf-8", expected_mtime=None)` | 应用统一 diff | 校验 hunk 头/行数，不匹配直接失败；乐观锁 | diff 无 @@；行数不符 |
+| 名称 | 工具 | 功能 | 主要参数/说明 | 常见误用 |
+| --- | --- | --- | --- | --- |
+| `edit_lines` | `edit_lines(file_path, start_line, end_line, new_content, expected_mtime=None, encoding="utf-8")` | 按行替换 | 1-based 闭区间；行越界抛错；乐观锁 | start/end 反向；越界 |
+| `insert_at_line` | `insert_at_line(file_path, line_number, content, expected_mtime=None, encoding="utf-8")` | 插入行 | line_number>=0；乐观锁 | 行号越界 |
+| `edit_block` | `edit_block(file_path, old_string, new_string, expected_replacements=1, expected_mtime=None, ignore_whitespace=False, normalize_escapes=False)` | 精确替换，行尾规范化 | 计数不符/空搜索/仅模糊命中会抛异常；支持 `ignore_whitespace` 空白不敏感匹配；`normalize_escapes` 可将 `\"`/`\\n` 等反转义后再匹配（默认关闭） | 期望计数错；空搜索；忽略空白时匹配过宽；误开反转义导致匹配过宽 |
+| `replace_string` | `replace_string(file_path, search_string, replace_string, expected_mtime=None, ignore_whitespace=False, normalize_escapes=False)` | 兼容单次替换包装 | 等价 `edit_block(..., expected_replacements=1)`；同样支持空白不敏感与可选反转义 | 空搜索；多处命中；忽略空白或反转义期开关期望计数不符 |
 
 ### 使用示例
 - 查看允许目录并设置相对基准：`list_allowed_roots` → 若未包含目标，调用 `set_root_path("/data/project")`。

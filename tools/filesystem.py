@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import base64
 import os
+import tempfile
 from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
+from fnmatch import fnmatch
 
 from .config import (
     FILE_OPERATION_TIMEOUTS,
     FILE_SIZE_LIMITS,
     READ_PERFORMANCE_THRESHOLDS,
+    DEFAULT_IGNORE_PATTERNS,
     get_allowed_roots,
     list_allowed_roots,
     get_file_read_line_limit,
@@ -27,6 +30,7 @@ if not logger.handlers:
 
 FileResult = Dict[str, object]
 DEFAULT_MAX_NESTED_ITEMS = 100
+MTIME_EPSILON_NS = 10_000_000  # 10ms tolerance
 
 
 def set_root_path(root_path: str) -> Path:
@@ -67,6 +71,19 @@ def _is_drive_root(p: Path) -> bool:
 
 def _is_unrestricted(roots: List[Path]) -> bool:
     return not roots or any(str(p) == "/" for p in roots)
+
+
+def _normalize_expected_mtime(expected: float | int | None) -> Optional[int]:
+    if expected is None:
+        return None
+    if expected > 1e12:  # assume nanoseconds
+        return int(expected)
+    return int(expected * 1_000_000_000)
+
+
+def _current_mtime_ns(path: Path) -> int:
+    stats = path.stat()
+    return getattr(stats, "st_mtime_ns", int(stats.st_mtime * 1_000_000_000))
 
 
 def _is_path_allowed(path: Path, allowed_roots: List[Path]) -> bool:
@@ -320,16 +337,16 @@ def write_file(file_path: str, content: str, mode: str = "rewrite", expected_mti
     valid_path = validate_path(file_path)
 
     if expected_mtime is not None and valid_path.exists():
-        current = valid_path.stat().st_mtime
-        if abs(current - expected_mtime) > 0.01:
+        expected_ns = _normalize_expected_mtime(expected_mtime)
+        current_ns = _current_mtime_ns(valid_path)
+        if expected_ns is not None and abs(current_ns - expected_ns) > MTIME_EPSILON_NS:
             raise RuntimeError(
-                f"Conflict: File modified by another process. Expected mtime {expected_mtime}, got {current}."
+                f"Conflict: File modified by another process. Expected mtime {expected_mtime}, got {current_ns / 1_000_000_000:.9f}."
             )
 
     if mode not in {"rewrite", "append"}:
         raise ValueError("mode must be 'rewrite' or 'append'")
 
-    valid_path.parent.mkdir(parents=True, exist_ok=True)
     content_bytes = len(content.encode("utf-8"))
     line_count = _count_lines(content)
     logger.info("write_file: ext=%s bytes=%s lines=%s mode=%s", valid_path.suffix, content_bytes, line_count, mode)
@@ -338,8 +355,7 @@ def write_file(file_path: str, content: str, mode: str = "rewrite", expected_mti
         with open(valid_path, "a", encoding="utf-8", newline="") as f:
             f.write(content)
     else:
-        with open(valid_path, "w", encoding="utf-8", newline="") as f:
-            f.write(content)
+        _atomic_write(valid_path, content, encoding="utf-8")
 
 
 def read_multiple_files(paths: List[str]) -> List[FileResult]:
@@ -363,9 +379,18 @@ def create_directory(dir_path: str) -> None:
     valid_path.mkdir(parents=True, exist_ok=True)
 
 
-def list_directory(dir_path: str, depth: int = 2) -> List[str]:
+def _normalize_ignore_patterns(patterns: Optional[List[str]]) -> List[str]:
+    if patterns is None:
+        return list(DEFAULT_IGNORE_PATTERNS)
+    if not all(isinstance(p, str) for p in patterns):
+        raise ValueError("ignore_patterns elements must all be strings.")
+    return list(patterns)  # empty list means no ignores
+
+
+def list_directory(dir_path: str, depth: int = 2, ignore_patterns: Optional[List[str]] = None) -> List[str]:
     valid_path = validate_path(dir_path)
     results: List[str] = []
+    patterns = _normalize_ignore_patterns(ignore_patterns)
 
     def _list(current: Path, current_depth: int, relative: str = "", is_top: bool = True) -> None:
         if current_depth <= 0:
@@ -385,6 +410,8 @@ def list_directory(dir_path: str, depth: int = 2) -> List[str]:
             filtered = total - DEFAULT_MAX_NESTED_ITEMS
 
         for entry in entries_to_show:
+            if any(fnmatch(entry.name, pat) for pat in patterns):
+                continue
             display = os.path.join(relative, entry.name) if relative else entry.name
             results.append(f"[DIR] {display}" if entry.is_dir() else f"[FILE] {display}")
             if entry.is_dir() and current_depth > 1:
@@ -414,14 +441,40 @@ def move_file(source_path: str, destination_path: str, expected_mtime: float | N
         raise FileExistsError(f"Destination already exists: {destination_path}")
 
     if expected_mtime is not None:
-        current = source.stat().st_mtime
-        if abs(current - expected_mtime) > 0.01:
+        expected_ns = _normalize_expected_mtime(expected_mtime)
+        current_ns = _current_mtime_ns(source)
+        if expected_ns is not None and abs(current_ns - expected_ns) > MTIME_EPSILON_NS:
             raise RuntimeError(
-                f"Conflict: File modified by another process. Expected mtime {expected_mtime}, got {current}."
+                f"Conflict: File modified by another process. Expected mtime {expected_mtime}, got {current_ns / 1_000_000_000:.9f}."
             )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     source.rename(dest)
+
+
+def _atomic_write(target: Path, content: str, encoding: str = "utf-8") -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", delete=False, encoding=encoding, newline="", dir=target.parent
+        ) as tmp:
+            temp_path = Path(tmp.name)
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        if target.exists():
+            try:
+                os.chmod(temp_path, target.stat().st_mode)
+            except OSError:
+                pass
+        os.replace(temp_path, target)
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def get_file_info(file_path: str) -> Dict[str, object]:
