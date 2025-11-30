@@ -81,11 +81,19 @@ uv run python server.py
     "code-editor": {
       "command": "code-editor",
       "env": {
-        "CODE_EDIT_ROOT": "C:\\\\Projects\\\\repo"
+        "CODE_EDIT_ROOT": "."
       }
     }
   }
 }
+```
+```toml
+[mcp_servers.code-editor]
+command = "code-editor"
+# 将工作目录指向当前项目,使 CODE_EDIT_ROOT 默认跟随启动时的 CWD
+cwd = "."
+startup_timeout_sec = 120
+
 ```
 
 ### 安全/行为提示
