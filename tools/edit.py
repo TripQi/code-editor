@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, TypedDict
 
 from .config import get_file_write_line_limit
-from .filesystem import read_file_internal, validate_path, write_file
+from .filesystem import normalize_encoding, read_file_internal, validate_path, write_file
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -107,12 +107,14 @@ def perform_search_replace(
     expected_mtime: float | None = None,
     ignore_whitespace: bool = False,
     normalize_escapes: bool = False,
+    encoding: str = "utf-8",
 ) -> str:
     if search == "":
         raise ValueError("Empty search strings are not allowed. Please provide a non-empty string to search for.")
 
+    enc = normalize_encoding(encoding)
     valid_path = validate_path(file_path)
-    content = read_file_internal(str(valid_path), 0, 1 << 60)
+    content = read_file_internal(str(valid_path), 0, 1 << 60, encoding=enc)
     line_ending = detect_line_ending(content)
     if normalize_escapes:
         search = _unescape_literal(search)
@@ -144,7 +146,7 @@ def perform_search_replace(
         else:
             new_content = content.replace(normalized_search, normalize_line_endings(replace, line_ending))
 
-        write_file(str(valid_path), new_content, mode="rewrite", expected_mtime=expected_mtime)
+        write_file(str(valid_path), new_content, mode="rewrite", expected_mtime=expected_mtime, encoding=enc)
         return f"Successfully applied {expected_replacements} edit(s) to {file_path}{warning}"
 
     # Whitespace-insensitive exact match path (optional)
@@ -177,7 +179,7 @@ def perform_search_replace(
                     f"Whitespace-insensitive replace updated {sub_count} occurrence(s), expected {expected_replacements}. "
                     "Please retry with a more specific search string."
                 )
-            write_file(str(valid_path), new_content, mode="rewrite", expected_mtime=expected_mtime)
+            write_file(str(valid_path), new_content, mode="rewrite", expected_mtime=expected_mtime, encoding=enc)
             return (
                 f"Successfully applied {expected_replacements} edit(s) to {file_path} with whitespace-insensitive matching"
                 f"{warning}"

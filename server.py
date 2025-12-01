@@ -11,14 +11,14 @@ from typing import List
 from mcp.server.fastmcp import FastMCP
 from tools import edit as edit_tools
 from tools import filesystem as fs_tools
-from tools.config import DEFAULT_IGNORE_PATTERNS
+from tools.config import DEFAULT_IGNORE_PATTERNS, get_root
 
 logging.basicConfig(level=logging.INFO)
 
 MTIME_EPSILON_NS = 10_000_000  # 10ms tolerance
 
 server = FastMCP("code-editor")
-ROOT = fs_tools.get_root()
+ROOT = get_root()
 CRITICAL_PATHS = {
     Path("/"),
     Path("/home"),
@@ -57,6 +57,10 @@ def _write_text(file_path: Path, content: str, encoding: str) -> None:
 
 def _read_text(file_path: Path, encoding: str) -> str:
     return file_path.read_text(encoding=encoding)
+
+
+def _normalize_encoding(encoding: str | None) -> str:
+    return fs_tools.normalize_encoding(encoding or "utf-8")
 
 
 def _normalize_expected_mtime(expected: float | int | None) -> int | None:
@@ -104,12 +108,12 @@ def _normalize_ignore_patterns(patterns: List[str] | str | None) -> List[str]:
 @server.tool()
 def set_root_path(root_path: str) -> str:
     """
-    Add/activate an allowed directory and set it as the base for resolving relative paths.
+    Add/activate an allowed directory whitelist entry.
 
     Notes:
     - Call list_allowed_roots first; if the target is already listed you may skip set_root_path.
-    - Path must exist and be a directory; otherwise raises FileNotFoundError/NotADirectoryError.
-    - Access control is enforced by the allowed directory list, not by the active base path.
+    - Path must be absolute, exist, and be a directory; otherwise raises FileNotFoundError/NotADirectoryError.
+    - Access control is enforced by the allowed directory list; paths are not rewritten or resolved against this root.
     """
     global ROOT
     ROOT = fs_tools.set_root_path(root_path)
@@ -122,6 +126,7 @@ def get_file_info(file_path: str) -> dict:
     Get stat info for a path.
     - Includes size/timestamps/permissions; for small text files includes lineCount and appendPosition.
     - Works on files or directories; auto-switches root if allowed.
+    - file_path must be absolute and within allowed directories.
     """
     return fs_tools.get_file_info(file_path)
 
@@ -138,21 +143,28 @@ def list_allowed_roots() -> list[str]:
 
 
 @server.tool()
-def read_file(file_path: str, offset: int = 0, length: int | None = None) -> dict:
+def read_file(
+    file_path: str,
+    offset: int = 0,
+    length: int | None = None,
+    encoding: str = "utf-8",
+) -> dict:
     """
     Read a file (text or image) with streaming behavior.
 
     - offset < 0 reads last |offset| lines; offset >= 0 reads from that line.
     - length is max lines to return; omit for default limit.
-    - Paths must be within the allowed directories list; use set_root_path to add bases for relative paths.
-    Common mistakes: passing URLs, non-integer offsets/length, or paths outside the allowed directories.
+    - Paths must be absolute and within the allowed directories list (managed via set_root_path whitelist).
+    - encoding defaults to utf-8; supports gbk and gb2312.
+    Common mistakes: passing URLs, non-integer offsets/length, unsupported encodings, or paths outside the allowed directories.
     """
-    return fs_tools.read_file(file_path, offset, length)
+    enc = _normalize_encoding(encoding)
+    return fs_tools.read_file(file_path, offset, length, encoding=enc)
 
 
 @server.tool()
 def create_directory(dir_path: str) -> str:
-    """Create a directory (parents allowed). Path must be under an allowed root (auto-switch supported)."""
+    """Create a directory (parents allowed). dir_path must be absolute and under an allowed root."""
     fs_tools.create_directory(dir_path)
     return f"Successfully created directory {dir_path}"
 
@@ -168,6 +180,7 @@ def list_directory(
     List directory contents.
     format="tree": nested string listing (default), respects depth.
     format="flat": immediate children with metadata, filtered by ignore_patterns.
+    - dir_path must be absolute and within allowed directories.
     Common mistakes: using unsupported format values; negative/zero depth; wrong pattern types.
     """
     resolved = _validate_path(dir_path)
@@ -202,18 +215,21 @@ def write_file(
     content: str,
     mode: str = "rewrite",
     expected_mtime: float | None = None,
+    encoding: str = "utf-8",
 ) -> str:
     """
     Write or append to a file.
     - mode: "rewrite"/"write" to overwrite, "append" to add.
     - expected_mtime: optional optimistic lock; mismatch raises.
-    - Paths must be within allowed directories; set_root_path only changes the base for relative resolution.
-    Common mistakes: mode values like "w"/"replace"; stale expected_mtime.
+    - Paths must be absolute and within allowed directories (set_root_path manages whitelist only).
+    - encoding defaults to utf-8; supports gbk and gb2312.
+    Common mistakes: mode values like "w"/"replace"; stale expected_mtime; unsupported encodings.
     """
     normalized_mode = "rewrite" if mode in {"rewrite", "write"} else mode
     if normalized_mode not in {"rewrite", "append"}:
         raise ValueError("mode must be 'rewrite' (or 'write') or 'append'")
-    fs_tools.write_file(file_path, content, mode=normalized_mode, expected_mtime=expected_mtime)
+    enc = _normalize_encoding(encoding)
+    fs_tools.write_file(file_path, content, mode=normalized_mode, expected_mtime=expected_mtime, encoding=enc)
     return f"Successfully {normalized_mode}d {file_path}."
 
 
@@ -222,7 +238,7 @@ def delete_file(file_path: str, expected_mtime: float | None = None) -> str:
     """
     Delete a file with optional optimistic lock.
     - Not for directories.
-    - Paths must be inside allowed directories; set_root_path only affects relative resolution.
+    - Paths must be absolute and inside allowed directories (set_root_path only manages whitelist).
     - expected_mtime protects against concurrent edits.
     """
     resolved = _validate_path(file_path)
@@ -245,7 +261,7 @@ def move_file(
     Move a file or directory.
     - Destination must not already exist.
     - expected_mtime checks the source before move.
-    - Paths must be within allowed directories; set_root_path controls the base for resolving relatives.
+    - source_path and destination_path must be absolute and within allowed directories (set_root_path only manages whitelist).
     """
     fs_tools.move_file(source_path, destination_path, expected_mtime)
     return f"Moved {source_path} to {destination_path}."
@@ -261,7 +277,7 @@ def copy_file(
     Copy a file.
     - Source must be a file; destination must not exist.
     - expected_mtime checks the source before copy.
-    - Paths must be within allowed directories; set_root_path controls the base for resolving relatives.
+    - source_path and destination_path must be absolute and within allowed directories (set_root_path only manages whitelist).
     """
     source = _validate_path(source_path)
     dest = _validate_path(destination_path)
@@ -283,7 +299,7 @@ def copy_file(
 def delete_directory(directory_path: str, expected_mtime: float | None = None) -> str:
     """
     Delete a directory recursively with safety rails.
-    - Must be a directory.
+    - Must be a directory and an absolute path within allowed directories.
     - Refuses to delete current root, its ancestors, or critical system dirs (/ /home /root /Users C:\\).
     - expected_mtime provides optimistic lock.
     """
@@ -292,7 +308,7 @@ def delete_directory(directory_path: str, expected_mtime: float | None = None) -
         raise FileNotFoundError(f"Directory not found: {directory_path}")
     if not resolved.is_dir():
         raise NotADirectoryError("delete_directory only supports directories.")
-    root = fs_tools.get_root()
+    root = get_root()
     if resolved == root or resolved in root.parents:
         raise PermissionError("Refusing to delete the active root or its ancestors.")
     critical_hit = any(resolved == p for p in CRITICAL_PATHS)
@@ -313,14 +329,17 @@ def replace_string(
     expected_mtime: float | None = None,
     ignore_whitespace: bool = False,
     normalize_escapes: bool = False,
+    encoding: str = "utf-8",
 ) -> str:
     """
     Backward-compatible single replacement with optimistic lock.
     - Same behavior as edit_block with expected_replacements=1.
     - Empty search or no match raises; fuzzy-only matches raise.
     - normalize_escapes optionally unescapes \"\\n\", \"\\t\", \"\\\"\", \"\\\\\" in the search string to match literal text.
+    - file_path must be an absolute path within allowed directories (managed via set_root_path whitelist).
     """
     # Backward-compatible alias to edit_block with single replacement and mtime protection.
+    enc = _normalize_encoding(encoding)
     return edit_tools.perform_search_replace(
         file_path,
         search_string,
@@ -329,6 +348,7 @@ def replace_string(
         expected_mtime=expected_mtime,
         ignore_whitespace=ignore_whitespace,
         normalize_escapes=normalize_escapes,
+        encoding=enc,
     )
 
 
@@ -351,13 +371,14 @@ def edit_lines(
         raise IsADirectoryError(f"Not a file: {file_path}")
 
     _check_expected_mtime(resolved, expected_mtime)
-    lines = _read_lines(resolved, encoding)
+    enc = _normalize_encoding(encoding)
+    lines = _read_lines(resolved, enc)
     if end_line > len(lines):
         raise ValueError("end_line exceeds total number of lines.")
 
     new_lines = new_content.splitlines(keepends=True)
     updated = lines[: start_line - 1] + new_lines + lines[end_line:]
-    _write_text(resolved, "".join(updated), encoding)
+    _write_text(resolved, "".join(updated), enc)
     return (
         f"Replaced lines {start_line}-{end_line} in {file_path} "
         f"with {len(new_lines)} new line(s)."
@@ -382,14 +403,15 @@ def insert_at_line(
         raise IsADirectoryError(f"Not a file: {file_path}")
 
     _check_expected_mtime(resolved, expected_mtime)
-    lines = _read_lines(resolved, encoding)
+    enc = _normalize_encoding(encoding)
+    lines = _read_lines(resolved, enc)
     if line_number > len(lines):
         raise ValueError("line_number exceeds total number of lines.")
 
     new_lines = content.splitlines(keepends=True)
     idx = line_number
     updated = lines[:idx] + new_lines + lines[idx:]
-    _write_text(resolved, "".join(updated), encoding)
+    _write_text(resolved, "".join(updated), enc)
     inserted_count = len(new_lines)
     inserted_start = line_number + 1 if inserted_count else line_number
     inserted_end = line_number + inserted_count
@@ -408,6 +430,7 @@ def edit_block(
     expected_mtime: float | None = None,
     ignore_whitespace: bool = False,
     normalize_escapes: bool = False,
+    encoding: str = "utf-8",
 ) -> str:
     """
     Precise search/replace with line-ending normalization and optimistic lock.
@@ -417,6 +440,7 @@ def edit_block(
     - ignore_whitespace allows whitespace-insensitive matching (collapses whitespace to \\s+).
     - normalize_escapes best-effort unescapes \"\\n\", \"\\t\", \"\\\"\", \"\\\\\" in the search string; keep off unless你的搜索串是转义文本。
     """
+    enc = _normalize_encoding(encoding)
     return edit_tools.perform_search_replace(
         file_path,
         old_string,
@@ -425,7 +449,34 @@ def edit_block(
         expected_mtime=expected_mtime,
         ignore_whitespace=ignore_whitespace,
         normalize_escapes=normalize_escapes,
+        encoding=enc,
     )
+
+
+@server.tool()
+def convert_file_encoding(
+    file_paths: List[str],
+    source_encoding: str,
+    target_encoding: str,
+    error_handling: str = "strict",
+    mismatch_policy: str = "warn-skip",
+) -> list[dict]:
+    """
+    Convert one or more text files from source_encoding to target_encoding in-place.
+    - file_paths must be absolute paths within allowed directories (set_root_path manages whitelist).
+    - Supported encodings: utf-8, gbk, gb2312.
+    - error_handling: 'strict' | 'replace' | 'ignore'; applied to both read and write.
+    - mismatch_policy: 'warn-skip' (default), 'fail-fast', 'force'.
+    """
+    err = error_handling.lower()
+    if err not in {"strict", "replace", "ignore"}:
+        raise ValueError("error_handling must be one of: strict, replace, ignore.")
+    policy = mismatch_policy.lower()
+    if policy not in {"warn-skip", "fail-fast", "force"}:
+        raise ValueError("mismatch_policy must be one of: warn-skip, fail-fast, force.")
+    src = _normalize_encoding(source_encoding)
+    tgt = _normalize_encoding(target_encoding)
+    return fs_tools.convert_file_encoding(file_paths, src, tgt, err, policy)
 
 if __name__ == "__main__":
     server.run()

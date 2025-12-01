@@ -47,8 +47,8 @@ ALLOWED_ROOTS_FILE = Path(
 
 def get_root() -> Path:
     """
-    Active base for resolving relative paths. No longer used as an access
-    control boundary; access is governed by allowed directories.
+    Active root marker (used for safety checks like delete_directory).
+    Paths must already be absolute; this is not used for resolving relative paths.
     """
     return Path(os.environ.get("CODE_EDIT_ROOT", Path.cwd())).expanduser().resolve()
 
