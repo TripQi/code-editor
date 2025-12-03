@@ -701,7 +701,7 @@ def detect_file_encoding(file_path: str, sample_size: int = 200_000) -> Dict[str
 
     result = from_bytes(data).best()
     if result is None:
-        encoding_result = {"encoding": None, "confidence": None}
+        encoding_result: Dict[str, object] = {"encoding": None, "confidence": None}
         _encoding_cache[path_str] = (current_mtime, None, None)
         return encoding_result
 
