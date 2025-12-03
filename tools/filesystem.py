@@ -40,6 +40,9 @@ ENCODING_ALIASES = {
     "gb-2312": "gb2312",
 }
 
+# Encoding detection cache: {file_path: (mtime_ns, encoding, confidence)}
+_encoding_cache: Dict[str, tuple[int, Optional[str], Optional[float]]] = {}
+
 
 def normalize_encoding(encoding: str | None) -> str:
     """
@@ -334,7 +337,10 @@ def _read_file_with_smart_positioning(
     include_status_message: bool = True,
 ) -> FileResult:
     file_size = file_path.stat().st_size
-    total_lines = _get_file_line_count(file_path, encoding)
+    # Only count lines for small files to avoid expensive full-file scans
+    total_lines = None
+    if file_size < FILE_SIZE_LIMITS["LARGE_FILE_THRESHOLD"]:
+        total_lines = _get_file_line_count(file_path, encoding)
 
     if offset < 0:
         requested_lines = abs(offset)
@@ -443,8 +449,18 @@ def write_file(
     logger.info("write_file: ext=%s bytes=%s lines=%s mode=%s", valid_path.suffix, content_bytes, line_count, mode)
 
     if mode == "append":
-        with open(valid_path, "a", encoding=enc, newline="") as f:
-            f.write(content)
+        # Use atomic write for append mode too by reading existing content first
+        existing_content = ""
+        if valid_path.exists():
+            try:
+                existing_content = valid_path.read_text(encoding=enc)
+            except Exception as e:
+                logger.warning(f"Failed to read existing content for atomic append: {e}")
+                # Fallback to direct append if read fails
+                with open(valid_path, "a", encoding=enc, newline="") as f:
+                    f.write(content)
+                return
+        _atomic_write(valid_path, existing_content + content, encoding=enc)
     else:
         _atomic_write(valid_path, content, encoding=enc)
 
@@ -653,6 +669,7 @@ def detect_file_encoding(file_path: str, sample_size: int = 200_000) -> Dict[str
     - file_path must be an absolute path within allowed directories.
     - sample_size limits the number of bytes read for detection.
     - Returns {"encoding": str | None, "confidence": float | None}.
+    - Uses mtime-based caching to avoid repeated expensive detection.
     """
     try:
         from charset_normalizer import from_bytes
@@ -669,12 +686,24 @@ def detect_file_encoding(file_path: str, sample_size: int = 200_000) -> Dict[str
     if _is_binary_file(path):
         raise ValueError("Binary file detected; encoding detection is only for text files.")
 
+    # Check cache first
+    path_str = str(path)
+    current_mtime = _current_mtime_ns(path)
+    if path_str in _encoding_cache:
+        cached_mtime, cached_encoding, cached_confidence = _encoding_cache[path_str]
+        if cached_mtime == current_mtime:
+            logger.debug(f"Encoding cache hit for {path_str}")
+            return {"encoding": cached_encoding, "confidence": cached_confidence}
+
+    # Cache miss or stale - perform detection
     with open(path, "rb") as f:
         data = f.read(sample_size)
 
     result = from_bytes(data).best()
     if result is None:
-        return {"encoding": None, "confidence": None}
+        encoding_result = {"encoding": None, "confidence": None}
+        _encoding_cache[path_str] = (current_mtime, None, None)
+        return encoding_result
 
     confidence: Optional[float] = None
     fingerprint = getattr(result, "fingerprint", None)
@@ -691,7 +720,13 @@ def detect_file_encoding(file_path: str, sample_size: int = 200_000) -> Dict[str
         except Exception:
             confidence = None
 
-    return {"encoding": getattr(result, "encoding", None), "confidence": confidence}
+    detected_encoding = getattr(result, "encoding", None)
+
+    # Update cache
+    _encoding_cache[path_str] = (current_mtime, detected_encoding, confidence)
+    logger.debug(f"Encoding detection for {path_str}: {detected_encoding} (confidence: {confidence})")
+
+    return {"encoding": detected_encoding, "confidence": confidence}
 
 
 def _atomic_write(target: Path, content: str, encoding: str = "utf-8", errors: str = "strict") -> None:
