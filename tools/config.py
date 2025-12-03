@@ -43,6 +43,12 @@ ALLOWED_ROOTS_FILE = Path(
         Path(__file__).resolve().parent / ".code_edit_roots.json",
     )
 )
+ENCODING_CACHE_FILE = Path(
+    os.environ.get(
+        "CODE_EDIT_ENCODING_CACHE_FILE",
+        Path(__file__).resolve().parent / ".encoding_cache.json",
+    )
+)
 
 
 def get_root() -> Path:
