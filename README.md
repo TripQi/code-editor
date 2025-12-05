@@ -36,7 +36,7 @@ uv run python server.py
 - 持久允许目录：`set_root_path` 成功后写入 JSON，可跨会话复用。
 - 乐观锁：写/删类支持秒或纳秒级 `expected_mtime`，10ms 容忍；写入走原子写避免部分落盘。
 - 默认忽略：`.git`、`__pycache__`、`node_modules`、`.DS_Store`、`.env*`、`.venv`、`*.log`、`*.pem`；`ignore_patterns` 传空字符串/空列表可关闭默认忽略。
-- 编码感知：默认 UTF-8，可切换 gbk/gb2312；`get_file_info` 会尝试检测编码与置信度。
+- 编码感知：`read_file` 默认自动探测/复用编码（utf-8/gb2312/gbk），基于最新 mtime 刷新的元信息缓存；如自动结果乱码，可显式传 `encoding` 覆盖。
 - 安全删除：禁止删除当前根/其祖先/关键系统目录。
 
 ### MCP 工具（code-editor）
@@ -47,8 +47,8 @@ uv run python server.py
 | --- | --- | --- | --- | --- |
 | `set_root_path` | `set_root_path(root_path)` | 加入允许目录（并更新安全标记） | 必须绝对且存在的目录；可先看 `list_allowed_roots` | 传相对路径/不存在路径 |
 | `list_allowed_roots` | `list_allowed_roots()` | 返回当前允许目录列表 | 合并环境变量与持久化 JSON | 以为会调整 CODE_EDIT_ROOT（不会） |
-| `get_file_info` | `get_file_info(file_path)` | stat + 编码(置信度) + 行数(小文件) | 绝对路径；可文件/目录；需在允许目录内 | 假设一定返回行数（大文件不会） |
-| `read_file` | `read_file(file_path, offset=0, length=None, encoding="utf-8")` | 流式读取文本/图片 | 绝对路径；offset<0 读尾；length 最大行数；支持 gbk/gb2312 | 传 URL；非整数 offset/length；相对路径 |
+| `get_file_info` | `get_file_info(file_path)` | stat + 编码(置信度) + 行数(小文件)；含 mtime/size | 绝对路径；文件或目录；需在允许目录内；用于大文件预检查或元信息获取 | 假设一定返回行数（大文件不会）；当作必需前置步骤 |
+| `read_file` | `read_file(file_path, offset=0, length=None, encoding=None)` | 流式读取文本/图片，自动探测/缓存编码（utf-8/gbk/gb2312），二进制返回提示 | 绝对路径；offset<0 读尾；length 最大行数；乱码时显式传 `encoding` 覆盖 | 传 URL；非整数 offset/length；相对路径；超大文件无范围读取 |
 | `create_directory` | `create_directory(dir_path)` | 递归建目录 | 绝对路径且在允许目录内 | 传文件路径 |
 | `list_directory` | `list_directory(dir_path, depth=2, format="tree"|"flat", ignore_patterns=None)` | 列目录 | 绝对路径；tree 返回字符串列表；flat 返回字典列表；`ignore_patterns` 为空则关闭默认忽略；支持 fnmatch | 用不支持的 format；depth<=0；ignore_patterns 非字符串列表 |
 | `write_file` | `write_file(file_path, content, mode="rewrite"/"write"/"append", expected_mtime=None, encoding="utf-8")` | 覆盖/追加写入 | 绝对路径；非法 mode 抛错；expected_mtime 乐观锁；rewrite 走原子写；支持 gbk/gb2312 | `mode="w"`/`"replace"`；mtime 过期；相对路径 |
