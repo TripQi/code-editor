@@ -5,7 +5,7 @@ import os
 import tempfile
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 import logging
 from fnmatch import fnmatch
 
@@ -42,6 +42,8 @@ ENCODING_ALIASES = {
 
 # Encoding detection cache: {file_path: (mtime_ns, encoding, confidence)}
 _encoding_cache: Dict[str, tuple[int, Optional[str], Optional[float]]] = {}
+# File metadata cache: {file_path: info_dict} keyed by current mtime_ns
+_file_info_cache: Dict[str, Dict[str, object]] = {}
 
 
 def normalize_encoding(encoding: str | None) -> str:
@@ -169,6 +171,26 @@ def _get_default_read_length() -> int:
     return get_file_read_line_limit()
 
 
+def _resolve_effective_encoding(user_encoding: Optional[str], detected_encoding: Optional[str]) -> str:
+    """
+    Determine which encoding to use for reading.
+
+    Priority:
+    1) user explicit encoding (unless empty/auto/None)
+    2) detected encoding from cached metadata
+    3) utf-8 fallback
+    """
+    if user_encoding is None:
+        return detected_encoding or "utf-8"
+
+    if isinstance(user_encoding, str):
+        trimmed = user_encoding.strip().lower()
+        if trimmed == "" or trimmed == "auto":
+            return detected_encoding or "utf-8"
+
+    return normalize_encoding(user_encoding)
+
+
 def _get_binary_file_instructions(file_path: Path, mime_type: str) -> str:
     file_name = file_path.name
     return (
@@ -176,6 +198,89 @@ def _get_binary_file_instructions(file_path: Path, mime_type: str) -> str:
         "Use start_process + interact_with_process to analyze binary files with appropriate tools.\n\n"
         "The read_file tool only handles text files and images."
     )
+
+
+def _build_file_metadata(valid_path: Path, stats: os.stat_result | None = None) -> Dict[str, object]:
+    """
+    Collect fresh file metadata and encoding info. This function always trusts the
+    provided stat result (to avoid double stat) and refreshes caches.
+    """
+    if stats is None:
+        stats = valid_path.stat()
+
+    mtime_ns = getattr(stats, "st_mtime_ns", int(stats.st_mtime * 1_000_000_000))
+    size = stats.st_size
+
+    info: Dict[str, object] = {
+        "mtime_ns": mtime_ns,
+        "size": size,
+        "created": stats.st_ctime,
+        "modified": stats.st_mtime,
+        "accessed": stats.st_atime,
+        "isDirectory": valid_path.is_dir(),
+        "isFile": valid_path.is_file(),
+        "permissions": oct(stats.st_mode)[-3:],
+    }
+
+    mime_type = get_mime_type(valid_path)
+    info["mimeType"] = mime_type
+    is_image = is_image_file(mime_type)
+    info["isImage"] = is_image
+
+    # Binary / encoding detection
+    info["isBinary"] = False
+    encoding: Optional[str] = None
+    confidence: Optional[float] = None
+    if not is_image:
+        try:
+            if _is_binary_file(valid_path):
+                info["isBinary"] = True
+            else:
+                enc_info = detect_file_encoding(str(valid_path))
+                encoding = enc_info.get("encoding")  # type: ignore[arg-type]
+                confidence = enc_info.get("confidence")  # type: ignore[arg-type]
+        except Exception:
+            # Best-effort only; swallow and continue with defaults
+            pass
+
+    info["encoding"] = encoding
+    info["encodingConfidence"] = confidence
+
+    # Optional lightweight line count for small text files
+    if (
+        not is_image
+        and not info["isBinary"]
+        and size < FILE_SIZE_LIMITS["LINE_COUNT_LIMIT"]
+    ):
+        try:
+            with open(valid_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            line_count = _count_lines(content)
+            info["lineCount"] = line_count
+            info["lastLine"] = max(0, line_count - 1)
+            info["appendPosition"] = line_count
+        except OSError:
+            pass
+
+    return info
+
+
+def _get_cached_file_metadata(valid_path: Path, stats: os.stat_result | None = None) -> Dict[str, object]:
+    """
+    Return cached metadata if mtime_ns matches; otherwise rebuild and refresh cache.
+    """
+    if stats is None:
+        stats = valid_path.stat()
+    current_mtime = getattr(stats, "st_mtime_ns", int(stats.st_mtime * 1_000_000_000))
+    path_str = str(valid_path)
+
+    cached = _file_info_cache.get(path_str)
+    if cached and cached.get("mtime_ns") == current_mtime:
+        return cached
+
+    fresh = _build_file_metadata(valid_path, stats)
+    _file_info_cache[path_str] = fresh
+    return fresh
 
 
 def _is_binary_file(file_path: Path) -> bool:
@@ -358,24 +463,32 @@ def _read_file_with_smart_positioning(
 
 
 def _read_file_from_disk(
-    file_path: str, offset: int = 0, length: Optional[int] = None, encoding: str = "utf-8"
+    file_path: str, offset: int = 0, length: Optional[int] = None, encoding: Optional[str] = None
 ) -> FileResult:
     if not file_path or not isinstance(file_path, str):
         raise ValueError("Invalid file path provided")
 
-    enc = normalize_encoding(encoding)
     if length is None:
         length = _get_default_read_length()
 
     valid_path = validate_path(file_path)
-    mime_type = get_mime_type(valid_path)
-    is_image = is_image_file(mime_type)
+    stats = valid_path.stat()
+    meta = _get_cached_file_metadata(valid_path, stats)
+    mime_type = cast(str, meta.get("mimeType") or "text/plain")
+    is_image = bool(meta.get("isImage"))
+    is_binary = bool(meta.get("isBinary"))
+    enc = _resolve_effective_encoding(encoding, meta.get("encoding"))  # type: ignore[arg-type]
 
     def _read_operation() -> FileResult:
         if is_image:
             with open(valid_path, "rb") as f:
                 content = base64.b64encode(f.read()).decode("ascii")
             return {"content": content, "mimeType": mime_type, "isImage": True}
+
+        if is_binary:
+            instructions = _get_binary_file_instructions(valid_path, mime_type)
+            return {"content": instructions, "mimeType": "text/plain", "isImage": False}
+
         try:
             return _read_file_with_smart_positioning(valid_path, offset, length, mime_type, enc, True)
         except Exception as exc:
@@ -395,7 +508,7 @@ def read_file(
     file_path: str,
     offset: int = 0,
     length: Optional[int] = None,
-    encoding: str = "utf-8",
+    encoding: Optional[str] = None,
 ) -> FileResult:
     return _read_file_from_disk(file_path, offset, length, encoding)
 
@@ -756,37 +869,20 @@ def _atomic_write(target: Path, content: str, encoding: str = "utf-8", errors: s
 
 def get_file_info(file_path: str) -> Dict[str, object]:
     valid_path = validate_path(file_path)
-    stats = valid_path.stat()
-
-    info: Dict[str, object] = {
-        "size": stats.st_size,
-        "created": stats.st_ctime,
-        "modified": stats.st_mtime,
-        "accessed": stats.st_atime,
-        "isDirectory": valid_path.is_dir(),
-        "isFile": valid_path.is_file(),
-        "permissions": oct(stats.st_mode)[-3:],
-    }
-
-    if valid_path.is_file():
-        # Try to detect encoding for text files (best-effort).
-        try:
-            enc_info = detect_file_encoding(str(valid_path))
-            info["encoding"] = enc_info.get("encoding")
-            info["encodingConfidence"] = enc_info.get("confidence")
-        except Exception:
-            pass
-
-        if stats.st_size < FILE_SIZE_LIMITS["LINE_COUNT_LIMIT"]:
-            mime_type = get_mime_type(valid_path)
-            if not is_image_file(mime_type):
-                try:
-                    with open(valid_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
-                    line_count = _count_lines(content)
-                    info["lineCount"] = line_count
-                    info["lastLine"] = max(0, line_count - 1)
-                    info["appendPosition"] = line_count
-                except OSError:
-                    pass
-    return info
+    meta = _get_cached_file_metadata(valid_path)
+    # Trim to public shape while keeping refreshed values
+    result_keys = [
+        "size",
+        "created",
+        "modified",
+        "accessed",
+        "isDirectory",
+        "isFile",
+        "permissions",
+        "encoding",
+        "encodingConfidence",
+        "lineCount",
+        "lastLine",
+        "appendPosition",
+    ]
+    return {k: meta[k] for k in result_keys if k in meta}

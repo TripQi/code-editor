@@ -59,8 +59,19 @@ def _read_text(file_path: Path, encoding: str) -> str:
     return file_path.read_text(encoding=encoding)
 
 
-def _normalize_encoding(encoding: str | None) -> str:
-    return fs_tools.normalize_encoding(encoding or "utf-8")
+def _normalize_encoding(encoding: str | None) -> str | None:
+    if encoding is None or encoding == "":
+        return None
+    return fs_tools.normalize_encoding(encoding)
+
+
+def _normalize_encoding_required(encoding: str | None, default: str = "utf-8") -> str:
+    """
+    For tool handlers that require a concrete encoding, fallback to default when None/""/auto.
+    """
+    if encoding is None or encoding == "" or encoding == "auto":
+        return fs_tools.normalize_encoding(default)
+    return fs_tools.normalize_encoding(encoding)
 
 
 def _normalize_expected_mtime(expected: float | int | None) -> int | None:
@@ -147,7 +158,7 @@ def read_file(
     file_path: str,
     offset: int = 0,
     length: int | None = None,
-    encoding: str = "utf-8",
+    encoding: str | None = None,
 ) -> dict:
     """
     Read a file (text or image) with streaming behavior.
@@ -155,7 +166,7 @@ def read_file(
     - offset < 0 reads last |offset| lines; offset >= 0 reads from that line.
     - length is max lines to return; omit for default limit.
     - Paths must be absolute and within the allowed directories list (managed via set_root_path whitelist).
-    - encoding defaults to utf-8; supports gbk and gb2312.
+    - encoding: None/""/\"auto\" will trigger auto-detect; otherwise supports utf-8/gbk/gb2312.
     Common mistakes: passing URLs, non-integer offsets/length, unsupported encodings, or paths outside the allowed directories.
     """
     enc = _normalize_encoding(encoding)
@@ -228,7 +239,7 @@ def write_file(
     normalized_mode = "rewrite" if mode in {"rewrite", "write"} else mode
     if normalized_mode not in {"rewrite", "append"}:
         raise ValueError("mode must be 'rewrite' (or 'write') or 'append'")
-    enc = _normalize_encoding(encoding)
+    enc = _normalize_encoding_required(encoding)
     fs_tools.write_file(file_path, content, mode=normalized_mode, expected_mtime=expected_mtime, encoding=enc)
     return f"Successfully {normalized_mode}d {file_path}."
 
@@ -339,7 +350,7 @@ def replace_string(
     - file_path must be an absolute path within allowed directories (managed via set_root_path whitelist).
     """
     # Backward-compatible alias to edit_block with single replacement and mtime protection.
-    enc = _normalize_encoding(encoding)
+    enc = _normalize_encoding_required(encoding)
     return edit_tools.perform_search_replace(
         file_path,
         search_string,
@@ -371,7 +382,7 @@ def edit_lines(
         raise IsADirectoryError(f"Not a file: {file_path}")
 
     _check_expected_mtime(resolved, expected_mtime)
-    enc = _normalize_encoding(encoding)
+    enc = _normalize_encoding_required(encoding)
     lines = _read_lines(resolved, enc)
     if end_line > len(lines):
         raise ValueError("end_line exceeds total number of lines.")
@@ -403,7 +414,7 @@ def insert_at_line(
         raise IsADirectoryError(f"Not a file: {file_path}")
 
     _check_expected_mtime(resolved, expected_mtime)
-    enc = _normalize_encoding(encoding)
+    enc = _normalize_encoding_required(encoding)
     lines = _read_lines(resolved, enc)
     if line_number > len(lines):
         raise ValueError("line_number exceeds total number of lines.")
@@ -440,7 +451,7 @@ def edit_block(
     - ignore_whitespace allows whitespace-insensitive matching (collapses whitespace to \\s+).
     - normalize_escapes best-effort unescapes \"\\n\", \"\\t\", \"\\\"\", \"\\\\\" in the search string; keep off unless你的搜索串是转义文本。
     """
-    enc = _normalize_encoding(encoding)
+    enc = _normalize_encoding_required(encoding)
     return edit_tools.perform_search_replace(
         file_path,
         old_string,
@@ -474,8 +485,8 @@ def convert_file_encoding(
     policy = mismatch_policy.lower()
     if policy not in {"warn-skip", "fail-fast", "force"}:
         raise ValueError("mismatch_policy must be one of: warn-skip, fail-fast, force.")
-    src = _normalize_encoding(source_encoding)
-    tgt = _normalize_encoding(target_encoding)
+    src = _normalize_encoding_required(source_encoding)
+    tgt = _normalize_encoding_required(target_encoding)
     return fs_tools.convert_file_encoding(file_paths, src, tgt, err, policy)
 
 if __name__ == "__main__":
