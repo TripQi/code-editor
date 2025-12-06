@@ -442,7 +442,7 @@ def edit_block(
     ignore_whitespace: bool = False,
     normalize_escapes: bool = False,
     encoding: str = "utf-8",
-) -> str:
+    ) -> str:
     """
     Precise search/replace with line-ending normalization and optimistic lock.
     - expected_replacements enforces exact match count.
@@ -462,6 +462,34 @@ def edit_block(
         normalize_escapes=normalize_escapes,
         encoding=enc,
     )
+
+
+@server.tool()
+def stream_replace(
+    file_path: str,
+    search_string: str,
+    replace_string: str,
+    expected_replacements: int | None = None,
+    expected_mtime: float | None = None,
+    encoding: str = "utf-8",
+    chunk_size: int = 8192,
+) -> str:
+    """
+    Streaming literal替换，面向超大文件，避免整文件载入内存。
+    - expected_replacements 为 None 时不校验计数；否则不符则回滚。
+    - chunk_size 控制单次读取大小，默认 8KB。
+    """
+    enc = _normalize_encoding_required(encoding, "utf-8")
+    replaced = fs_tools.stream_replace(
+        file_path,
+        search_string,
+        replace_string,
+        expected_replacements=expected_replacements,
+        expected_mtime=expected_mtime,
+        encoding=enc,
+        chunk_size=chunk_size,
+    )
+    return f"stream_replace completed with {replaced} replacement(s) in {file_path}."
 
 
 @server.tool()

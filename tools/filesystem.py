@@ -578,6 +578,85 @@ def write_file(
         _atomic_write(valid_path, content, encoding=enc)
 
 
+def stream_replace(
+    file_path: str,
+    search: str,
+    replace: str,
+    expected_replacements: Optional[int] = None,
+    expected_mtime: float | None = None,
+    encoding: str = "utf-8",
+    chunk_size: int = 8192,
+) -> int:
+    """
+    Streaming 逐块替换，适用于超大文件，避免整文件载入内存。
+
+    - search 必须非空。
+    - expected_replacements 为 None 时不校验计数；否则计数不符会回滚并报错。
+    - 逐块读取并保留尾巴，确保跨块匹配；写入临时文件后原子替换。
+    """
+    if not search:
+        raise ValueError("search string must be non-empty.")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive.")
+
+    enc = normalize_encoding(encoding)
+    valid_path = validate_path(file_path)
+    if not valid_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    if not valid_path.is_file():
+        raise IsADirectoryError(f"Not a file: {file_path}")
+
+    expected_ns = _normalize_expected_mtime(expected_mtime)
+    if expected_ns is not None and abs(_current_mtime_ns(valid_path) - expected_ns) > MTIME_EPSILON_NS:
+        raise RuntimeError("Conflict: File modified by another process.")
+
+    fd, temp_name = tempfile.mkstemp(prefix=valid_path.name + ".", dir=valid_path.parent)
+    temp_path = Path(temp_name)
+    os.close(fd)
+
+    replaced = 0
+    tail = ""
+    search_len = len(search)
+
+    try:
+        with open(valid_path, "r", encoding=enc, errors="strict") as src, open(
+            temp_path, "w", encoding=enc, errors="strict"
+        ) as dst:
+            while True:
+                chunk = src.read(chunk_size)
+                if not chunk:
+                    break
+                data = tail + chunk
+                keep = max(search_len - 1, 0)
+                if keep:
+                    body, tail = data[:-keep], data[-keep:]
+                else:
+                    body, tail = data, ""
+                replaced_body = body.replace(search, replace)
+                replaced += body.count(search)
+                dst.write(replaced_body)
+
+            if tail:
+                replaced_tail = tail.replace(search, replace)
+                replaced += tail.count(search)
+                dst.write(replaced_tail)
+
+        if expected_replacements is not None and replaced != expected_replacements:
+            raise RuntimeError(
+                f"stream_replace updated {replaced} occurrence(s), expected {expected_replacements}. No changes applied."
+            )
+
+        os.replace(temp_path, valid_path)
+        return replaced
+    except Exception:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        raise
+
+
 def read_multiple_files(paths: List[str], encoding: str = "utf-8") -> List[FileResult]:
     results: List[FileResult] = []
     enc = normalize_encoding(encoding)
