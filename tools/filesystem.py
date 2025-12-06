@@ -46,6 +46,15 @@ _encoding_cache: Dict[str, tuple[int, Optional[str], Optional[float]]] = {}
 _file_info_cache: Dict[str, Dict[str, object]] = {}
 
 
+def _invalidate_file_cache(path: str) -> None:
+    """
+    Best-effort cache invalidation after a file is modified.
+    Removes encoding and metadata cache entries for the path.
+    """
+    _encoding_cache.pop(path, None)
+    _file_info_cache.pop(path, None)
+
+
 def normalize_encoding(encoding: str | None) -> str:
     """
     Normalize user-supplied encoding names and enforce the supported set.
@@ -578,6 +587,91 @@ def write_file(
         _atomic_write(valid_path, content, encoding=enc)
 
 
+def _apply_stream_replace(
+    valid_path: Path,
+    search: str,
+    replace: str,
+    *,
+    expected_replacements: Optional[int],
+    expected_mtime: float | None,
+    encoding: str,
+    chunk_size: int,
+    meta: Optional[Dict[str, object]] = None,
+) -> int:
+    """
+    Core streaming replacement logic shared by tools.
+    Caller must provide already-normalized search/replace (including EOL).
+    """
+    if not search:
+        raise ValueError("search string must be non-empty.")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive.")
+
+    enc = normalize_encoding(encoding)
+    stats = valid_path.stat()
+    current_meta = meta or _get_cached_file_metadata(valid_path, stats)
+    if current_meta.get("isBinary") or current_meta.get("isImage"):
+        raise RuntimeError("Cannot perform text replacement on binary or image files.")
+
+    expected_ns = _normalize_expected_mtime(expected_mtime)
+    if expected_ns is not None and abs(_current_mtime_ns(valid_path) - expected_ns) > MTIME_EPSILON_NS:
+        raise RuntimeError("Conflict: File modified by another process.")
+
+    def _stream_op() -> int:
+        fd, temp_name = tempfile.mkstemp(prefix=valid_path.name + ".", dir=valid_path.parent)
+        temp_path = Path(temp_name)
+        os.close(fd)
+
+        replaced = 0
+        tail = ""
+        search_len = len(search)
+
+        try:
+            with open(valid_path, "r", encoding=enc, errors="strict") as src, open(
+                temp_path, "w", encoding=enc, errors="strict"
+            ) as dst:
+                while True:
+                    chunk = src.read(chunk_size)
+                    if not chunk:
+                        break
+                    data = tail + chunk
+                    keep = max(search_len - 1, 0)
+                    if keep:
+                        body, tail = data[:-keep], data[-keep:]
+                    else:
+                        body, tail = data, ""
+                    replaced_body = body.replace(search, replace)
+                    replaced += body.count(search)
+                    dst.write(replaced_body)
+
+                if tail:
+                    replaced_tail = tail.replace(search, replace)
+                    replaced += tail.count(search)
+                    dst.write(replaced_tail)
+
+            if expected_replacements is not None and replaced != expected_replacements:
+                raise RuntimeError(
+                    f"stream_replace updated {replaced} occurrence(s), expected {expected_replacements}. No changes applied."
+                )
+
+            os.replace(temp_path, valid_path)
+            _invalidate_file_cache(str(valid_path))
+            return replaced
+        except Exception:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            raise
+
+    return with_timeout(
+        _stream_op,
+        FILE_OPERATION_TIMEOUTS["FILE_WRITE"],
+        f"Stream replace operation for {valid_path} timed out",
+    )
+
+
 def stream_replace(
     file_path: str,
     search: str,
@@ -593,68 +687,23 @@ def stream_replace(
     - search must be non-empty.
     - If expected_replacements is None, count is not enforced; otherwise a mismatch triggers rollback/error.
     - Reads in chunks and keeps a tail to handle cross-chunk matches; writes to a temp file then atomically replaces.
+    - Intended as an advanced tool; edit_block will auto-select this path for large files.
     """
-    if not search:
-        raise ValueError("search string must be non-empty.")
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be positive.")
-
-    enc = normalize_encoding(encoding)
     valid_path = validate_path(file_path)
     if not valid_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
     if not valid_path.is_file():
         raise IsADirectoryError(f"Not a file: {file_path}")
 
-    expected_ns = _normalize_expected_mtime(expected_mtime)
-    if expected_ns is not None and abs(_current_mtime_ns(valid_path) - expected_ns) > MTIME_EPSILON_NS:
-        raise RuntimeError("Conflict: File modified by another process.")
-
-    fd, temp_name = tempfile.mkstemp(prefix=valid_path.name + ".", dir=valid_path.parent)
-    temp_path = Path(temp_name)
-    os.close(fd)
-
-    replaced = 0
-    tail = ""
-    search_len = len(search)
-
-    try:
-        with open(valid_path, "r", encoding=enc, errors="strict") as src, open(
-            temp_path, "w", encoding=enc, errors="strict"
-        ) as dst:
-            while True:
-                chunk = src.read(chunk_size)
-                if not chunk:
-                    break
-                data = tail + chunk
-                keep = max(search_len - 1, 0)
-                if keep:
-                    body, tail = data[:-keep], data[-keep:]
-                else:
-                    body, tail = data, ""
-                replaced_body = body.replace(search, replace)
-                replaced += body.count(search)
-                dst.write(replaced_body)
-
-            if tail:
-                replaced_tail = tail.replace(search, replace)
-                replaced += tail.count(search)
-                dst.write(replaced_tail)
-
-        if expected_replacements is not None and replaced != expected_replacements:
-            raise RuntimeError(
-                f"stream_replace updated {replaced} occurrence(s), expected {expected_replacements}. No changes applied."
-            )
-
-        os.replace(temp_path, valid_path)
-        return replaced
-    except Exception:
-        if temp_path.exists():
-            try:
-                temp_path.unlink()
-            except Exception:
-                pass
-        raise
+    return _apply_stream_replace(
+        valid_path,
+        search,
+        replace,
+        expected_replacements=expected_replacements,
+        expected_mtime=expected_mtime,
+        encoding=encoding,
+        chunk_size=chunk_size,
+    )
 
 
 def read_multiple_files(paths: List[str], encoding: str = "utf-8") -> List[FileResult]:
@@ -672,6 +721,24 @@ def read_multiple_files(paths: List[str], encoding: str = "utf-8") -> List[FileR
         except Exception as exc:  # pragma: no cover - user facing aggregation
             results.append({"path": path, "error": str(exc)})
     return results
+
+
+def _detect_line_ending_head(valid_path: Path, encoding: str, probe_size: int = 1024) -> str:
+    """
+    Detect primary line ending from the first probe_size bytes.
+    Returns '\\r\\n' if found, otherwise '\\n' (default for empty/single-line files).
+    """
+    try:
+        with open(valid_path, "r", encoding=encoding, errors="replace") as f:
+            head = f.read(max(probe_size, 1024))
+    except OSError:
+        return "\n"
+
+    if "\r\n" in head:
+        return "\r\n"
+    if "\n" in head:
+        return "\n"
+    return "\n"
 
 
 def create_directory(dir_path: str) -> None:

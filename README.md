@@ -62,13 +62,8 @@ uv run python server.py
 
 | 名称 | 工具 | 功能 | 主要参数/说明 | 常见误用 |
 | --- | --- | --- | --- | --- |
-| `edit_lines` | `edit_lines(file_path, start_line, end_line, new_content, expected_mtime=None, encoding="utf-8")` | 按行替换 | 1-based 闭区间；行越界抛错；乐观锁 | start/end 反向；越界 |
-| `insert_at_line` | `insert_at_line(file_path, line_number, content, expected_mtime=None, encoding="utf-8")` | 插入行 | line_number>=0；乐观锁 | 行号越界 |
-| `edit_block` | `edit_block(file_path, old_string, new_string, expected_replacements=1, expected_mtime=None, ignore_whitespace=False, normalize_escapes=False)` | 精确替换，行尾规范化 | 计数不符/空搜索/仅模糊命中会抛异常；支持 `ignore_whitespace` 空白不敏感匹配；`normalize_escapes` 可将 `\"`/`\\n` 等反转义后再匹配（默认关闭） | 期望计数错；空搜索；忽略空白时匹配过宽；误开反转义导致匹配过宽 |
-| `stream_replace` | `stream_replace(file_path, search_string, replace_string, expected_replacements=None, expected_mtime=None, encoding="utf-8", chunk_size=8192)` | Streaming chunked replacement for very large files; reads/writes in chunks and atomically replaces; optional count check | search empty; expected count mismatch; chunk_size<=0 |
-| `replace_string` | `replace_string(file_path, search_string, replace_string, expected_mtime=None, ignore_whitespace=False, normalize_escapes=False)` | 兼容单次替换包装 | 等价 `edit_block(..., expected_replacements=1)`；同样支持空白不敏感与可选反转义 | 空搜索；多处命中；忽略空白或反转义期开关期望计数不符 |
-
-### 使用示例
+| `edit_block` | `edit_block(file_path, old_string, new_string, expected_replacements=1, expected_mtime=None, ignore_whitespace=False, normalize_escapes=False, encoding="utf-8")` | 精确替换，行尾规范化；>10MB 自动走流式精确匹配 | 计数不符/空搜索/仅模糊命中会抛异常；大文件仅支持严格字面匹配 | 期望计数错；空搜索；大文件下使用忽略空白/转义归一会报错 |
+| `stream_replace` | `stream_replace(file_path, search_string, replace_string, expected_replacements=None, expected_mtime=None, encoding="utf-8", chunk_size=8192)` | Streaming chunked literal replace for very large files；通常由 edit_block 自动选择；可自定义 chunk_size | search 为空；预期计数不符；chunk_size<=0；二进制/图片拒绝 |
 - 查看并新增允许目录：`list_allowed_roots` → 若未包含目标，调用 `set_root_path("/data/project")`。
 - 带锁写入：`info = get_file_info("/abs/path/src/app.py")` → `write_file("/abs/path/src/app.py", content, mode="rewrite", expected_mtime=info["modified"])`。
 - 精确替换：`edit_block("/abs/path/src/app.py", "old", "new", expected_replacements=1, expected_mtime=info["modified"])`。

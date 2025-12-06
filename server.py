@@ -11,7 +11,7 @@ from typing import List
 from mcp.server.fastmcp import FastMCP
 from tools import edit as edit_tools
 from tools import filesystem as fs_tools
-from tools.config import DEFAULT_IGNORE_PATTERNS, get_root
+from tools.config import DEFAULT_IGNORE_PATTERNS, FILE_SIZE_LIMITS, get_root
 
 logging.basicConfig(level=logging.INFO)
 
@@ -442,19 +442,56 @@ def edit_block(
     ignore_whitespace: bool = False,
     normalize_escapes: bool = False,
     encoding: str = "utf-8",
-    ) -> str:
+) -> str:
     """
     Precise search/replace with line-ending normalization and optimistic lock.
-    - expected_replacements enforces exact match count.
-    - Empty search raises; fuzzy-only matches raise with diff guidance.
+    - Automatically streams large files (>LARGE_FILE_THRESHOLD) for strict literal replacement.
+    - Large-file mode does not support ignore_whitespace or normalize_escapes.
+    - expected_replacements enforces exact match count; mismatch triggers rollback.
     - expected_mtime protects against concurrent edits.
-    - ignore_whitespace allows whitespace-insensitive matching (collapses whitespace to \\s+).
-    - normalize_escapes best-effort unescapes \"\\n\", \"\\t\", \"\\\"\", \"\\\\\" in the search string; keep off unless你的搜索串是转义文本。
     """
     enc = _normalize_encoding_required(encoding)
-    return edit_tools.perform_search_replace(
+    resolved = _validate_path(file_path)
+    stats = resolved.stat()
+    meta = fs_tools._get_cached_file_metadata(resolved, stats)
+
+    if meta.get("isBinary") or meta.get("isImage"):
+        raise RuntimeError("Cannot edit binary or image files with edit_block.")
+
+    size = int(meta.get("size", stats.st_size))
+    threshold = FILE_SIZE_LIMITS.get("LARGE_FILE_THRESHOLD", 10 * 1024 * 1024)
+
+    if size > threshold:
+        if ignore_whitespace or normalize_escapes:
+            raise RuntimeError(
+@server.tool()
+def stream_replace(
+    file_path: str,
+    search_string: str,
+    replace_string: str,
+    expected_replacements: int | None = None,
+    expected_mtime: float | None = None,
+    encoding: str = "utf-8",
+    chunk_size: int = 8192,
+) -> str:
+    """
+    Streaming, chunked literal replacement for very large files to avoid loading the whole file.
+    - If expected_replacements is None, count is not enforced; otherwise mismatch triggers rollback.
+    - chunk_size controls per-read size (default 8KB).
+    - Advanced use: edit_block will auto-select this for large files; call directly only when you need
+      custom chunk_size or explicit streaming.
+    """
+    enc = _normalize_encoding_required(encoding, "utf-8")
+    replaced = fs_tools.stream_replace(
         file_path,
-        old_string,
+        search_string,
+        replace_string,
+        expected_replacements=expected_replacements,
+        expected_mtime=expected_mtime,
+        encoding=enc,
+        chunk_size=chunk_size,
+    )
+    return f"stream_replace completed with {replaced} replacement(s) in {file_path}."
         new_string,
         expected_replacements=expected_replacements,
         expected_mtime=expected_mtime,
@@ -462,6 +499,8 @@ def edit_block(
         normalize_escapes=normalize_escapes,
         encoding=enc,
     )
+    fs_tools._invalidate_file_cache(str(resolved))
+    return result
 
 
 @server.tool()
