@@ -8,7 +8,7 @@ from difflib import SequenceMatcher, ndiff
 from pathlib import Path
 from typing import Dict, TypedDict
 
-from .config import get_file_write_line_limit
+from .config import FILE_SIZE_LIMITS, get_file_write_line_limit
 from .filesystem import normalize_encoding, read_file_internal, validate_path, write_file
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,16 @@ def perform_search_replace(
 
     enc = normalize_encoding(encoding)
     valid_path = validate_path(file_path)
-    content = read_file_internal(str(valid_path), 0, 1 << 60, encoding=enc)
+    # 防御性限制：拒绝处理超大文件，避免一次性读入导致内存/CPU DoS
+    max_bytes = FILE_SIZE_LIMITS.get("LARGE_FILE_THRESHOLD", 10 * 1024 * 1024)
+    file_size = valid_path.stat().st_size
+    if file_size > max_bytes:
+        raise RuntimeError(
+            f"File too large for edit_block: {file_size} bytes (limit {max_bytes} bytes). "
+            "Please narrow the edit range or split the file."
+        )
+
+    content = read_file_internal(str(valid_path), 0, 1 << 30, encoding=enc)
     line_ending = detect_line_ending(content)
     if normalize_escapes:
         search = _unescape_literal(search)
