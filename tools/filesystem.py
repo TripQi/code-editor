@@ -588,11 +588,11 @@ def stream_replace(
     chunk_size: int = 8192,
 ) -> int:
     """
-    Streaming 逐块替换，适用于超大文件，避免整文件载入内存。
+    Streaming, chunked literal replacement for very large files without loading the whole file into memory.
 
-    - search 必须非空。
-    - expected_replacements 为 None 时不校验计数；否则计数不符会回滚并报错。
-    - 逐块读取并保留尾巴，确保跨块匹配；写入临时文件后原子替换。
+    - search must be non-empty.
+    - If expected_replacements is None, count is not enforced; otherwise a mismatch triggers rollback/error.
+    - Reads in chunks and keeps a tail to handle cross-chunk matches; writes to a temp file then atomically replaces.
     """
     if not search:
         raise ValueError("search string must be non-empty.")

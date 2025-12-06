@@ -475,9 +475,9 @@ def stream_replace(
     chunk_size: int = 8192,
 ) -> str:
     """
-    Streaming literal替换，面向超大文件，避免整文件载入内存。
-    - expected_replacements 为 None 时不校验计数；否则不符则回滚。
-    - chunk_size 控制单次读取大小，默认 8KB。
+    Streaming, chunked literal replacement for very large files to avoid loading the whole file.
+    - If expected_replacements is None, count is not enforced; otherwise mismatch triggers rollback.
+    - chunk_size controls per-read size (default 8KB).
     """
     enc = _normalize_encoding_required(encoding, "utf-8")
     replaced = fs_tools.stream_replace(
