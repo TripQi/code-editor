@@ -1,6 +1,6 @@
 [project]
 name = "code-editor-mcp"
-version = "0.1.8"
+version = "0.1.9"
 description = "Code editor MCP server with sandboxing, optimistic locking, and path whitelists."
 readme = "README.md"
 requires-python = ">=3.10"
