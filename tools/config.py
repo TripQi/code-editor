@@ -53,7 +53,7 @@ ENCODING_CACHE_FILE = Path(
 
 def get_root() -> Path:
     """
-    Active root marker (used for safety checks like delete_directory).
+    Active root marker (used for safety checks like dir_ops delete).
     Paths must already be absolute; this is not used for resolving relative paths.
     """
     return Path(os.environ.get("CODE_EDIT_ROOT", Path.cwd())).expanduser().resolve()

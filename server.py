@@ -402,32 +402,6 @@ def file_ops(
 
 
 @server.tool()
-def delete_directory(directory_path: str, expected_mtime: float | None = None) -> str:
-    """
-    Delete a directory recursively with safety rails.
-    - Must be a directory and an absolute path within allowed directories.
-    - Refuses to delete current root, its ancestors, or critical system dirs (/ /home /root /Users C:\\).
-    - expected_mtime provides optimistic lock.
-    """
-    resolved = _validate_path(directory_path)
-    if not resolved.exists():
-        raise FileNotFoundError(f"Directory not found: {directory_path}")
-    if not resolved.is_dir():
-        raise NotADirectoryError("delete_directory only supports directories.")
-    root = get_root()
-    if resolved == root or resolved in root.parents:
-        raise PermissionError("Refusing to delete the active root or its ancestors.")
-    critical_hit = any(resolved == p for p in CRITICAL_PATHS)
-    if resolved.anchor:
-        critical_hit = critical_hit or resolved == Path(resolved.anchor)
-    if critical_hit:
-        raise PermissionError(f"Refusing to delete critical system directory: {resolved}")
-    _check_expected_mtime(resolved, expected_mtime)
-    shutil.rmtree(resolved)
-    return f"Deleted directory {directory_path}."
-
-
-@server.tool()
 def edit_block(
     file_path: str,
     old_string: str,
