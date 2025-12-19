@@ -35,12 +35,13 @@ def main() -> None:
     srv.file_ops("append", file_path=str(append_file), content="b\n")
     assert append_file.read_text(encoding="utf-8") == "a\nb\n"
 
-    # P1: list_directory flat max_items
+    # P1: dir_ops list flat max_items
     list_dir = temp_dir / "list_dir"
     list_dir.mkdir()
     for i in range(5):
         (list_dir / f"f{i}.txt").write_text("x", encoding="utf-8")
-    entries = srv.list_directory(
+    entries = srv.dir_ops(
+        action="list",
         dir_path=str(list_dir),
         format="flat",
         ignore_patterns=[],

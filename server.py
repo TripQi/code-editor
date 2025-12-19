@@ -114,6 +114,25 @@ def _normalize_ignore_patterns(patterns: List[str] | str | None) -> List[str]:
     return items  # empty list => show all files
 
 
+def _delete_confirm_token(resolved: Path) -> str:
+    token_path = os.path.normcase(str(resolved))
+    return f"delete:{token_path}"
+
+
+def build_delete_confirm_token(dir_path: str) -> str:
+    resolved = _validate_path(dir_path)
+    return _delete_confirm_token(resolved)
+
+
+def _is_directory_empty(resolved: Path) -> bool:
+    try:
+        return next(resolved.iterdir(), None) is None
+    except OSError as exc:
+        raise PermissionError(
+            f"Cannot inspect directory contents for safety: {resolved}"
+        ) from exc
+
+
 # --- Tools ---------------------------------------------------------------
 
 @server.tool()
@@ -174,29 +193,53 @@ def read_file(
 
 
 @server.tool()
-def create_directory(dir_path: str) -> str:
-    """Create a directory (parents allowed). dir_path must be absolute and under an allowed root."""
+def dir_ops(
+    action: str,
+    dir_path: str,
+    depth: int = 2,
+    format: str = "tree",
+    ignore_patterns: List[str] | None = None,
+    max_items: int | None = 1000,
+    expected_mtime: float | None = None,
+    confirm_token: str | None = None,
+    allow_nonempty: bool | None = None,
+) -> list | str:
+    """
+    Unified directory operations.
+
+    - action: "create" | "list" | "delete"
+    - create: requires dir_path (absolute, allowed); other params are ignored
+    - list: uses depth/format/ignore_patterns/max_items
+    - delete: requires expected_mtime, confirm_token, allow_nonempty (explicit)
+      confirm_token must equal "delete:<normalized_abs_path>"
+      normalized_abs_path = os.path.normcase(str(Path(dir_path).resolve()))
+    """
+    if not isinstance(action, str):
+        raise ValueError("action must be a string.")
+    if not isinstance(dir_path, str):
+        raise ValueError("dir_path must be a string.")
+
+    normalized_action = action.lower()
+    if normalized_action == "create":
+        return _create_directory(dir_path)
+    if normalized_action == "list":
+        return _list_directory(dir_path, depth, format, ignore_patterns, max_items)
+    if normalized_action == "delete":
+        return _delete_directory(dir_path, expected_mtime, confirm_token, allow_nonempty)
+    raise ValueError("action must be one of: create, list, delete.")
+
+def _create_directory(dir_path: str) -> str:
     fs_tools.create_directory(dir_path)
     return f"Successfully created directory {dir_path}"
 
 
-@server.tool()
-def list_directory(
+def _list_directory(
     dir_path: str,
     depth: int = 2,
     format: str = "tree",
     ignore_patterns: List[str] | None = None,
     max_items: int | None = 1000,
 ) -> list:
-    """
-    List directory contents.
-    format="tree": nested string listing (default), respects depth.
-    format="flat": immediate children with metadata, filtered by ignore_patterns.
-    - dir_path must be absolute and within allowed directories.
-    - ignore_patterns: None uses default ignores; empty string/list disables default ignores.
-    - max_items: only for flat mode; None disables limit.
-    Common mistakes: using unsupported format values; negative/zero depth; wrong pattern types.
-    """
     resolved = _validate_path(dir_path)
     if not resolved.exists():
         raise FileNotFoundError(f"Directory not found: {dir_path}")
@@ -238,6 +281,52 @@ def list_directory(
             }
         )
     return entries
+
+
+def _delete_directory(
+    directory_path: str,
+    expected_mtime: float | None,
+    confirm_token: str | None,
+    allow_nonempty: bool | None,
+) -> str:
+    if expected_mtime is None:
+        raise ValueError("expected_mtime is required for delete.")
+    if confirm_token is None or not isinstance(confirm_token, str) or not confirm_token.strip():
+        raise ValueError("confirm_token is required for delete.")
+    if allow_nonempty is None or not isinstance(allow_nonempty, bool):
+        raise ValueError("allow_nonempty is required for delete.")
+
+    resolved = _validate_path(directory_path)
+    if not resolved.exists():
+        raise FileNotFoundError(f"Directory not found: {directory_path}")
+    if not resolved.is_dir():
+        raise NotADirectoryError("delete only supports directories.")
+
+    root = get_root()
+    if resolved == root or resolved in root.parents:
+        raise PermissionError("Refusing to delete the active root or its ancestors.")
+    critical_hit = any(resolved == p for p in CRITICAL_PATHS)
+    if resolved.anchor:
+        critical_hit = critical_hit or resolved == Path(resolved.anchor)
+    if critical_hit:
+        raise PermissionError(f"Refusing to delete critical system directory: {resolved}")
+
+    expected_token = _delete_confirm_token(resolved)
+    if confirm_token.strip() != expected_token:
+        raise PermissionError(
+            "confirm_token mismatch. "
+            f"Expected confirm_token to be '{expected_token}'."
+        )
+
+    if allow_nonempty is False and not _is_directory_empty(resolved):
+        raise PermissionError(
+            "Refusing to delete non-empty directory. "
+            "Set allow_nonempty=True to proceed."
+        )
+
+    _check_expected_mtime(resolved, expected_mtime)
+    shutil.rmtree(resolved)
+    return f"Deleted directory {directory_path}."
 
 
 @server.tool()

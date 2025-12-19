@@ -49,11 +49,22 @@ uv run python server.py
 | `list_allowed_roots` | `list_allowed_roots()` | 返回当前允许目录列表 | 合并环境变量与持久化 JSON | 以为会调整 CODE_EDIT_ROOT（不会） |
 | `get_file_info` | `get_file_info(file_path)` | stat + 编码(置信度) + 行数(小文件)；含 mtime/size | 绝对路径；文件或目录；需在允许目录内；用于大文件预检查或元信息获取 | 假设一定返回行数（大文件不会）；当作必需前置步骤 |
 | `read_file` | `read_file(file_path, offset=0, length=None, encoding=None)` | 流式读取文本/图片，自动探测/缓存编码（utf-8/gbk/gb2312），二进制返回提示 | 绝对路径；offset<0 读尾；length 最大行数（超过 `CODE_EDIT_FILE_READ_LINE_LIMIT` 会截断）；乱码时显式传 `encoding` 覆盖 | 传 URL；非整数 offset/length；相对路径；超大文件无范围读取 |
-| `create_directory` | `create_directory(dir_path)` | 递归建目录 | 绝对路径且在允许目录内 | 传文件路径 |
-| `list_directory` | `list_directory(dir_path, depth=2, format="tree"|"flat", ignore_patterns=None, max_items=1000)` | 列目录 | 绝对路径；tree 返回字符串列表；flat 返回字典列表；`ignore_patterns` 为 None 用默认忽略，空字符串/空列表关闭默认忽略；flat 下 `max_items` 限制返回条数；支持 fnmatch | 用不支持的 format；depth<=0；ignore_patterns 非字符串列表；max_items<=0 |
+| `dir_ops` | `dir_ops(action, dir_path, depth=2, format="tree"|"flat", ignore_patterns=None, max_items=1000, expected_mtime=None, confirm_token=None, allow_nonempty=None)` | 统一目录操作 | `action`=create/list/delete；绝对路径；list: tree 返回字符串列表、flat 返回字典列表；`ignore_patterns` 为 None 用默认忽略，空字符串/空列表关闭默认忽略；flat 下 `max_items` 限制返回条数；delete: 必须提供 `expected_mtime`、`confirm_token`、`allow_nonempty`，`confirm_token`=`delete:<normalized_abs_path>`（Path.resolve + os.path.normcase） | action 不支持/参数缺失；delete 未显式 allow_nonempty；confirm_token 不匹配 |
 | `file_ops` | `file_ops(action, file_path=None, content=None, source_path=None, destination_path=None, expected_mtime=None, encoding="utf-8")` | 综合文件操作：write/append/copy/move/delete | 所有路径必须绝对且在允许目录内；write 覆盖、append 追加；write/append 需 file_path+content；copy/move 需 source_path+destination_path；delete 需 file_path；encoding 仅写入使用；expected_mtime：写/删校验目标文件，拷贝/移动校验源文件 | action 不支持或参数缺失；copy 目标已存在；delete 目标是目录 |
-| `delete_directory` | `delete_directory(directory_path, expected_mtime=None)` | 递归删目录 | 绝对路径；禁删当前 root/祖先/关键目录；必须是目录 | 传文件；试图删根或系统目录 |
 | `convert_file_encoding` | `convert_file_encoding(file_paths, source_encoding, target_encoding, error_handling="strict", mismatch_policy="warn-skip")` | 批量转码并覆盖写回 | 绝对路径列表；utf-8/gbk/gb2312；错误处理 strict/replace/ignore；编码检测( charset-normalizer )，策略 fail-fast / warn-skip(默认) / force；结果返回 detectedEncoding/Confidence/mismatch；内置别名兼容 utf8/utf_8/cp936/gb-2312 | 相对路径；二进制文件；未在白名单 |
+
+#### dir_ops 参数要点（避免误调用）
+- `create`：仅 `dir_path` 必须；其余参数会被忽略。
+- `list`：`format` 仅支持 `tree`/`flat`；`max_items` 必须为正整数或 None。
+- `delete`：必须同时提供 `expected_mtime`、`confirm_token`、`allow_nonempty`（显式 True/False）。
+- `confirm_token` 生成规则（严格匹配）：
+```python
+from pathlib import Path
+import os
+
+normalized = os.path.normcase(str(Path(dir_path).resolve()))
+confirm_token = f"delete:{normalized}"
+```
 
 #### 代码精准编辑工具
 
@@ -64,7 +75,8 @@ uv run python server.py
 - 带锁写入：`info = get_file_info("/abs/path/src/app.py")` → `file_ops(action="write", file_path="/abs/path/src/app.py", content=content, expected_mtime=info["modified"])`。
 - 精确替换：`edit_block("/abs/path/src/app.py", "old", "new", expected_replacements=1, expected_mtime=info["modified"])`。
 - 批量转码：`convert_file_encoding(["/abs/a.txt", "/abs/b.txt"], "gb2312", "utf-8", error_handling="replace", mismatch_policy="warn-skip")`。
-- 列目录（扁平）：`list_directory("/abs/path", format="flat", ignore_patterns=[".git", "node_modules"])`。
+- 列目录（扁平）：`dir_ops(action="list", dir_path="/abs/path", format="flat", ignore_patterns=[".git", "node_modules"])`。
+- 删除目录（显式确认）：`info = get_file_info("/abs/path")` → `normalized = os.path.normcase(str(Path("/abs/path").resolve()))` → `token = f"delete:{normalized}"` → `dir_ops(action="delete", dir_path="/abs/path", expected_mtime=info["modified"], confirm_token=token, allow_nonempty=True)`。
 
 ### MCP 客户端快速配置示例
 
@@ -90,5 +102,5 @@ startup_timeout_sec = 120
 
 ### 安全/行为提示
 - 路径验证：所有操作要求**绝对路径**且落在允许目录列表内；`CODE_EDIT_ROOT` 仅为安全标记。
-- 删除防护：`delete_directory` 拒绝删除当前 root、其祖先和关键系统目录（/ /home /root /Users C:\\）。
+- 删除防护：`dir_ops` 的 delete 行为拒绝删除当前 root、其祖先和关键系统目录（/ /home /root /Users C:\\）。
 - 允许目录管理：如需访问新路径，先 `set_root_path` 加入白名单；不在白名单的绝对路径会被拒绝。
