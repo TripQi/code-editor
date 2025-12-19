@@ -29,7 +29,7 @@ uv run python server.py
 | `CODE_EDIT_ALLOWED_ROOTS_FILE` | 允许目录持久化文件 | `tools/.code_edit_roots.json` |
 | `CODE_EDIT_ALLOWED_DIRECTORIES` (兼容 `CODE_EDIT_ALLOWED_ROOTS`) | 额外允许目录（逗号分隔） | 空 |
 | `CODE_EDIT_FILE_READ_LINE_LIMIT` | `read_file` 最大行数 | 1000 |
-| `CODE_EDIT_FILE_WRITE_LINE_LIMIT` | `write_file` 行数警戒 | 50 |
+| `CODE_EDIT_FILE_WRITE_LINE_LIMIT` | `file_ops` 写入行数警戒 | 50 |
 
 ### 设计要点
 - 允许目录列表：默认允许用户主目录；路径需落在允许目录内，否则拒绝。`set_root_path` 仅将目录加入允许列表并更新安全标记，不做路径拼接。
@@ -48,13 +48,10 @@ uv run python server.py
 | `set_root_path` | `set_root_path(root_path)` | 加入允许目录（并更新安全标记） | 必须绝对且存在的目录；可先看 `list_allowed_roots` | 传相对路径/不存在路径 |
 | `list_allowed_roots` | `list_allowed_roots()` | 返回当前允许目录列表 | 合并环境变量与持久化 JSON | 以为会调整 CODE_EDIT_ROOT（不会） |
 | `get_file_info` | `get_file_info(file_path)` | stat + 编码(置信度) + 行数(小文件)；含 mtime/size | 绝对路径；文件或目录；需在允许目录内；用于大文件预检查或元信息获取 | 假设一定返回行数（大文件不会）；当作必需前置步骤 |
-| `read_file` | `read_file(file_path, offset=0, length=None, encoding=None)` | 流式读取文本/图片，自动探测/缓存编码（utf-8/gbk/gb2312），二进制返回提示 | 绝对路径；offset<0 读尾；length 最大行数；乱码时显式传 `encoding` 覆盖 | 传 URL；非整数 offset/length；相对路径；超大文件无范围读取 |
+| `read_file` | `read_file(file_path, offset=0, length=None, encoding=None)` | 流式读取文本/图片，自动探测/缓存编码（utf-8/gbk/gb2312），二进制返回提示 | 绝对路径；offset<0 读尾；length 最大行数（超过 `CODE_EDIT_FILE_READ_LINE_LIMIT` 会截断）；乱码时显式传 `encoding` 覆盖 | 传 URL；非整数 offset/length；相对路径；超大文件无范围读取 |
 | `create_directory` | `create_directory(dir_path)` | 递归建目录 | 绝对路径且在允许目录内 | 传文件路径 |
-| `list_directory` | `list_directory(dir_path, depth=2, format="tree"|"flat", ignore_patterns=None)` | 列目录 | 绝对路径；tree 返回字符串列表；flat 返回字典列表；`ignore_patterns` 为空则关闭默认忽略；支持 fnmatch | 用不支持的 format；depth<=0；ignore_patterns 非字符串列表 |
-| `write_file` | `write_file(file_path, content, mode="rewrite"/"write"/"append", expected_mtime=None, encoding="utf-8")` | 覆盖/追加写入 | 绝对路径；非法 mode 抛错；expected_mtime 乐观锁；rewrite 走原子写；支持 gbk/gb2312 | `mode="w"`/`"replace"`；mtime 过期；相对路径 |
-| `delete_file` | `delete_file(file_path, expected_mtime=None)` | 删文件 | 绝对路径；仅文件；乐观锁 | 目标是目录；相对路径 |
-| `move_file` | `move_file(source_path, destination_path, expected_mtime=None)` | 移动/重命名 | 绝对路径；目标不能存在 | 传相对路径；目标已存在 |
-| `copy_file` | `copy_file(source_path, destination_path, expected_mtime=None)` | 复制文件 | 绝对路径；源必须是文件；目标不存在 | 源是目录；目标已存在；相对路径 |
+| `list_directory` | `list_directory(dir_path, depth=2, format="tree"|"flat", ignore_patterns=None, max_items=1000)` | 列目录 | 绝对路径；tree 返回字符串列表；flat 返回字典列表；`ignore_patterns` 为 None 用默认忽略，空字符串/空列表关闭默认忽略；flat 下 `max_items` 限制返回条数；支持 fnmatch | 用不支持的 format；depth<=0；ignore_patterns 非字符串列表；max_items<=0 |
+| `file_ops` | `file_ops(action, file_path=None, content=None, source_path=None, destination_path=None, expected_mtime=None, encoding="utf-8")` | 综合文件操作：write/append/copy/move/delete | 所有路径必须绝对且在允许目录内；write 覆盖、append 追加；write/append 需 file_path+content；copy/move 需 source_path+destination_path；delete 需 file_path；encoding 仅写入使用；expected_mtime：写/删校验目标文件，拷贝/移动校验源文件 | action 不支持或参数缺失；copy 目标已存在；delete 目标是目录 |
 | `delete_directory` | `delete_directory(directory_path, expected_mtime=None)` | 递归删目录 | 绝对路径；禁删当前 root/祖先/关键目录；必须是目录 | 传文件；试图删根或系统目录 |
 | `convert_file_encoding` | `convert_file_encoding(file_paths, source_encoding, target_encoding, error_handling="strict", mismatch_policy="warn-skip")` | 批量转码并覆盖写回 | 绝对路径列表；utf-8/gbk/gb2312；错误处理 strict/replace/ignore；编码检测( charset-normalizer )，策略 fail-fast / warn-skip(默认) / force；结果返回 detectedEncoding/Confidence/mismatch；内置别名兼容 utf8/utf_8/cp936/gb-2312 | 相对路径；二进制文件；未在白名单 |
 
@@ -62,10 +59,9 @@ uv run python server.py
 
 | 名称 | 工具 | 功能 | 主要参数/说明 | 常见误用 |
 | --- | --- | --- | --- | --- |
-| `edit_block` | `edit_block(file_path, old_string, new_string, expected_replacements=1, expected_mtime=None, ignore_whitespace=False, normalize_escapes=False, encoding="utf-8")` | 精确替换，行尾规范化；>10MB 自动走流式精确匹配 | 计数不符/空搜索/仅模糊命中会抛异常；大文件仅支持严格字面匹配 | 期望计数错；空搜索；大文件下使用忽略空白/转义归一会报错 |
-| `stream_replace` | `stream_replace(file_path, search_string, replace_string, expected_replacements=None, expected_mtime=None, encoding="utf-8", chunk_size=8192)` | Streaming chunked literal replace for very large files；通常由 edit_block 自动选择；可自定义 chunk_size | search 为空；预期计数不符；chunk_size<=0；二进制/图片拒绝 |
+| `edit_block` | `edit_block(file_path, old_string, new_string, expected_replacements=1, expected_mtime=None, ignore_whitespace=False, normalize_escapes=False, encoding="utf-8")` | 精确替换，行尾规范化；>10MB 自动走流式精确匹配 | 绝对路径且在允许目录内；old_string 为搜索文本，new_string 为替换文本；计数不符/空搜索/仅模糊命中会抛异常；大文件仅支持严格字面匹配 | 期望计数错；空搜索；大文件下使用忽略空白/转义归一会报错 |
 - 查看并新增允许目录：`list_allowed_roots` → 若未包含目标，调用 `set_root_path("/data/project")`。
-- 带锁写入：`info = get_file_info("/abs/path/src/app.py")` → `write_file("/abs/path/src/app.py", content, mode="rewrite", expected_mtime=info["modified"])`。
+- 带锁写入：`info = get_file_info("/abs/path/src/app.py")` → `file_ops(action="write", file_path="/abs/path/src/app.py", content=content, expected_mtime=info["modified"])`。
 - 精确替换：`edit_block("/abs/path/src/app.py", "old", "new", expected_replacements=1, expected_mtime=info["modified"])`。
 - 批量转码：`convert_file_encoding(["/abs/a.txt", "/abs/b.txt"], "gb2312", "utf-8", error_handling="replace", mismatch_policy="warn-skip")`。
 - 列目录（扁平）：`list_directory("/abs/path", format="flat", ignore_patterns=[".git", "node_modules"])`。

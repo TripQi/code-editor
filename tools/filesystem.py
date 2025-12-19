@@ -479,6 +479,12 @@ def _read_file_from_disk(
 
     if length is None:
         length = _get_default_read_length()
+    requested_length = length
+    max_length = get_file_read_line_limit()
+    truncated = False
+    if length is not None and length > max_length:
+        length = max_length
+        truncated = True
 
     valid_path = validate_path(file_path)
     stats = valid_path.stat()
@@ -499,7 +505,14 @@ def _read_file_from_disk(
             return {"content": instructions, "mimeType": "text/plain", "isImage": False}
 
         try:
-            return _read_file_with_smart_positioning(valid_path, offset, length, mime_type, enc, True)
+            result = _read_file_with_smart_positioning(valid_path, offset, length, mime_type, enc, True)
+            if truncated and isinstance(result.get("content"), str):
+                notice = (
+                    f"[TRUNCATED] requested {requested_length} lines exceeds limit {max_length}. "
+                    f"Showing first {max_length} lines."
+                )
+                result["content"] = f"{notice}\n\n{result['content']}"
+            return result
         except Exception as exc:
             if _is_binary_file(valid_path):
                 instructions = _get_binary_file_instructions(valid_path, mime_type)
@@ -571,18 +584,51 @@ def write_file(
     logger.info("write_file: ext=%s bytes=%s lines=%s mode=%s", valid_path.suffix, content_bytes, line_count, mode)
 
     if mode == "append":
-        # Use atomic write for append mode too by reading existing content first
-        existing_content = ""
-        if valid_path.exists():
-            try:
-                existing_content = valid_path.read_text(encoding=enc)
-            except Exception as e:
-                logger.warning(f"Failed to read existing content for atomic append: {e}")
-                # Fallback to direct append if read fails
-                with open(valid_path, "a", encoding=enc, newline="") as f:
-                    f.write(content)
-                return
-        _atomic_write(valid_path, existing_content + content, encoding=enc)
+        if not valid_path.exists():
+            _atomic_write(valid_path, content, encoding=enc)
+            return
+
+        # Use temp file + chunked copy to avoid loading the whole file into memory.
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                delete=False,
+                encoding=enc,
+                errors="strict",
+                newline="",
+                dir=valid_path.parent,
+            ) as tmp:
+                temp_path = Path(tmp.name)
+                with open(valid_path, "r", encoding=enc, errors="strict", newline="") as src:
+                    while True:
+                        chunk = src.read(READ_PERFORMANCE_THRESHOLDS["CHUNK_SIZE"])
+                        if not chunk:
+                            break
+                        tmp.write(chunk)
+                tmp.write(content)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+
+            if valid_path.exists():
+                try:
+                    os.chmod(temp_path, valid_path.stat().st_mode)
+                except OSError:
+                    pass
+            os.replace(temp_path, valid_path)
+            _invalidate_file_cache(str(valid_path))
+            return
+        except Exception as e:
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            logger.warning(f"Failed to stream-append with temp file: {e}")
+            # Fallback to direct append if streaming fails
+            with open(valid_path, "a", encoding=enc, newline="") as f:
+                f.write(content)
+            return
     else:
         _atomic_write(valid_path, content, encoding=enc)
 
@@ -665,11 +711,8 @@ def _apply_stream_replace(
                     pass
             raise
 
-    return with_timeout(
-        _stream_op,
-        FILE_OPERATION_TIMEOUTS["FILE_WRITE"],
-        f"Stream replace operation for {valid_path} timed out",
-    )
+    # Avoid timeouts for side-effecting operations to prevent "timeout but file changed" ambiguity.
+    return _stream_op()
 
 
 def stream_replace(

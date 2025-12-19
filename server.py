@@ -107,7 +107,7 @@ def _normalize_ignore_patterns(patterns: List[str] | str | None) -> List[str]:
         return list(DEFAULT_IGNORE_PATTERNS)
     if isinstance(patterns, str):
         cleaned = [p.strip() for p in patterns.split(",") if p.strip()]
-        return cleaned  # empty string means “no ignores”
+        return cleaned  # empty string means no ignores
     items = list(patterns)
     if any(not isinstance(p, str) for p in items):
         raise ValueError("ignore_patterns elements must all be strings.")
@@ -164,7 +164,7 @@ def read_file(
     Read a file (text or image) with streaming behavior.
 
     - offset < 0 reads last |offset| lines; offset >= 0 reads from that line.
-    - length is max lines to return; omit for default limit.
+    - length is max lines to return; omit for default limit (clamped by CODE_EDIT_FILE_READ_LINE_LIMIT).
     - Paths must be absolute and within the allowed directories list (managed via set_root_path whitelist).
     - encoding: None/""/\"auto\" will trigger auto-detect; otherwise supports utf-8/gbk/gb2312.
     Common mistakes: passing URLs, non-integer offsets/length, unsupported encodings, or paths outside the allowed directories.
@@ -186,12 +186,15 @@ def list_directory(
     depth: int = 2,
     format: str = "tree",
     ignore_patterns: List[str] | None = None,
+    max_items: int | None = 1000,
 ) -> list:
     """
     List directory contents.
     format="tree": nested string listing (default), respects depth.
     format="flat": immediate children with metadata, filtered by ignore_patterns.
     - dir_path must be absolute and within allowed directories.
+    - ignore_patterns: None uses default ignores; empty string/list disables default ignores.
+    - max_items: only for flat mode; None disables limit.
     Common mistakes: using unsupported format values; negative/zero depth; wrong pattern types.
     """
     resolved = _validate_path(dir_path)
@@ -209,101 +212,104 @@ def list_directory(
     if fmt == "tree":
         return fs_tools.list_directory(str(resolved), depth, patterns)
 
+    if max_items is not None and max_items <= 0:
+        raise ValueError("max_items must be a positive integer or None.")
+
     entries = []
+    total_visible = 0
     for entry in sorted(resolved.iterdir(), key=lambda p: p.name):
         if any(fnmatch(entry.name, pat) for pat in patterns):
             continue
+        total_visible += 1
         info = {"name": entry.name, "is_dir": entry.is_dir()}
         if entry.is_file():
             info["size"] = entry.stat().st_size
-        entries.append(info)
+        if max_items is None or len(entries) < max_items:
+            entries.append(info)
+
+    if max_items is not None and total_visible > max_items:
+        entries.append(
+            {
+                "name": f"[WARNING] truncated: showing first {max_items} of {total_visible} items",
+                "is_dir": False,
+                "truncated": True,
+                "total": total_visible,
+                "shown": max_items,
+            }
+        )
     return entries
 
 
 @server.tool()
-def write_file(
-    file_path: str,
-    content: str,
-    mode: str = "rewrite",
+def file_ops(
+    action: str,
+    file_path: str | None = None,
+    content: str | None = None,
+    source_path: str | None = None,
+    destination_path: str | None = None,
     expected_mtime: float | None = None,
     encoding: str = "utf-8",
 ) -> str:
     """
-    Write or append to a file.
-    - mode: "rewrite"/"write" to overwrite, "append" to add.
-    - expected_mtime: optional optimistic lock; mismatch raises.
-    - Paths must be absolute and within allowed directories (set_root_path manages whitelist only).
-    - encoding defaults to utf-8; supports gbk and gb2312.
-    Common mistakes: mode values like "w"/"replace"; stale expected_mtime; unsupported encodings.
+    Unified file operations.
+    - action: "write" | "append" | "copy" | "move" | "delete"
+    - write/append: requires file_path + content (encoding applies)
+    - copy/move: requires source_path + destination_path
+    - delete: requires file_path
+    - All paths must be absolute and within allowed directories.
+    - "write" overwrites the file; "append" adds to the end.
+    - encoding is only used for write/append.
+    - expected_mtime applies to the target file for write/append/delete, and the source file for copy/move.
+    - copy requires a file source and a destination that does not exist; delete only supports files.
     """
-    normalized_mode = "rewrite" if mode in {"rewrite", "write"} else mode
-    if normalized_mode not in {"rewrite", "append"}:
-        raise ValueError("mode must be 'rewrite' (or 'write') or 'append'")
-    enc = _normalize_encoding_required(encoding)
-    fs_tools.write_file(file_path, content, mode=normalized_mode, expected_mtime=expected_mtime, encoding=enc)
-    return f"Successfully {normalized_mode}d {file_path}."
+    if not isinstance(action, str):
+        raise ValueError("action must be a string.")
+    normalized_action = action.lower()
 
+    if normalized_action in {"write", "append"}:
+        if file_path is None:
+            raise ValueError("file_path is required for write/append.")
+        if content is None:
+            raise ValueError("content is required for write/append.")
+        enc = _normalize_encoding_required(encoding)
+        mode = "rewrite" if normalized_action == "write" else "append"
+        fs_tools.write_file(file_path, content, mode=mode, expected_mtime=expected_mtime, encoding=enc)
+        return f"Successfully {mode}d {file_path}."
 
-@server.tool()
-def delete_file(file_path: str, expected_mtime: float | None = None) -> str:
-    """
-    Delete a file with optional optimistic lock.
-    - Not for directories.
-    - Paths must be absolute and inside allowed directories (set_root_path only manages whitelist).
-    - expected_mtime protects against concurrent edits.
-    """
-    resolved = _validate_path(file_path)
-    if not resolved.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    if resolved.is_dir():
-        raise IsADirectoryError("delete_file only supports files.")
-    _check_expected_mtime(resolved, expected_mtime)
-    resolved.unlink()
-    return f"Deleted file {file_path}."
+    if normalized_action == "delete":
+        if file_path is None:
+            raise ValueError("file_path is required for delete.")
+        resolved = _validate_path(file_path)
+        if not resolved.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        if resolved.is_dir():
+            raise IsADirectoryError("delete only supports files.")
+        _check_expected_mtime(resolved, expected_mtime)
+        resolved.unlink()
+        return f"Deleted file {file_path}."
 
+    if normalized_action in {"copy", "move"}:
+        if source_path is None or destination_path is None:
+            raise ValueError("source_path and destination_path are required for copy/move.")
+        if normalized_action == "move":
+            fs_tools.move_file(source_path, destination_path, expected_mtime)
+            return f"Moved {source_path} to {destination_path}."
 
-@server.tool()
-def move_file(
-    source_path: str,
-    destination_path: str,
-    expected_mtime: float | None = None,
-) -> str:
-    """
-    Move a file or directory.
-    - Destination must not already exist.
-    - expected_mtime checks the source before move.
-    - source_path and destination_path must be absolute and within allowed directories (set_root_path only manages whitelist).
-    """
-    fs_tools.move_file(source_path, destination_path, expected_mtime)
-    return f"Moved {source_path} to {destination_path}."
+        source = _validate_path(source_path)
+        dest = _validate_path(destination_path)
+        if not source.exists():
+            raise FileNotFoundError(f"Source not found: {source_path}")
+        if not source.is_file():
+            raise IsADirectoryError("copy only supports files.")
+        if dest.exists():
+            raise FileExistsError(f"Destination already exists: {destination_path}")
 
+        _check_expected_mtime(source, expected_mtime)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        return f"Copied {source_path} to {destination_path}."
 
-@server.tool()
-def copy_file(
-    source_path: str,
-    destination_path: str,
-    expected_mtime: float | None = None,
-) -> str:
-    """
-    Copy a file.
-    - Source must be a file; destination must not exist.
-    - expected_mtime checks the source before copy.
-    - source_path and destination_path must be absolute and within allowed directories (set_root_path only manages whitelist).
-    """
-    source = _validate_path(source_path)
-    dest = _validate_path(destination_path)
-
-    if not source.exists():
-        raise FileNotFoundError(f"Source not found: {source_path}")
-    if not source.is_file():
-        raise IsADirectoryError("copy_file only supports files.")
-    if dest.exists():
-        raise FileExistsError(f"Destination already exists: {destination_path}")
-
-    _check_expected_mtime(source, expected_mtime)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, dest)
-    return f"Copied {source_path} to {destination_path}."
+    raise ValueError("action must be one of: write, append, copy, move, delete.")
 
 
 @server.tool()
@@ -333,106 +339,6 @@ def delete_directory(directory_path: str, expected_mtime: float | None = None) -
 
 
 @server.tool()
-def replace_string(
-    file_path: str,
-    search_string: str,
-    replace_string: str,
-    expected_mtime: float | None = None,
-    ignore_whitespace: bool = False,
-    normalize_escapes: bool = False,
-    encoding: str = "utf-8",
-) -> str:
-    """
-    Backward-compatible single replacement with optimistic lock.
-    - Same behavior as edit_block with expected_replacements=1.
-    - Empty search or no match raises; fuzzy-only matches raise.
-    - normalize_escapes optionally unescapes \"\\n\", \"\\t\", \"\\\"\", \"\\\\\" in the search string to match literal text.
-    - file_path must be an absolute path within allowed directories (managed via set_root_path whitelist).
-    """
-    # Backward-compatible alias to edit_block with single replacement and mtime protection.
-    enc = _normalize_encoding_required(encoding)
-    return edit_tools.perform_search_replace(
-        file_path,
-        search_string,
-        replace_string,
-        expected_replacements=1,
-        expected_mtime=expected_mtime,
-        ignore_whitespace=ignore_whitespace,
-        normalize_escapes=normalize_escapes,
-        encoding=enc,
-    )
-
-
-@server.tool()
-def edit_lines(
-    file_path: str,
-    start_line: int,
-    end_line: int,
-    new_content: str,
-    encoding: str = "utf-8",
-    expected_mtime: float | None = None,
-) -> str:
-    if start_line < 1 or end_line < start_line:
-        raise ValueError("start_line must be >= 1 and end_line must be >= start_line.")
-
-    resolved = _validate_path(file_path)
-    if not resolved.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    if not resolved.is_file():
-        raise IsADirectoryError(f"Not a file: {file_path}")
-
-    _check_expected_mtime(resolved, expected_mtime)
-    enc = _normalize_encoding_required(encoding)
-    lines = _read_lines(resolved, enc)
-    if end_line > len(lines):
-        raise ValueError("end_line exceeds total number of lines.")
-
-    new_lines = new_content.splitlines(keepends=True)
-    updated = lines[: start_line - 1] + new_lines + lines[end_line:]
-    _write_text(resolved, "".join(updated), enc)
-    return (
-        f"Replaced lines {start_line}-{end_line} in {file_path} "
-        f"with {len(new_lines)} new line(s)."
-    )
-
-
-@server.tool()
-def insert_at_line(
-    file_path: str,
-    line_number: int,
-    content: str,
-    encoding: str = "utf-8",
-    expected_mtime: float | None = None,
-) -> str:
-    if line_number < 0:
-        raise ValueError("line_number must be >= 0.")
-
-    resolved = _validate_path(file_path)
-    if not resolved.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    if not resolved.is_file():
-        raise IsADirectoryError(f"Not a file: {file_path}")
-
-    _check_expected_mtime(resolved, expected_mtime)
-    enc = _normalize_encoding_required(encoding)
-    lines = _read_lines(resolved, enc)
-    if line_number > len(lines):
-        raise ValueError("line_number exceeds total number of lines.")
-
-    new_lines = content.splitlines(keepends=True)
-    idx = line_number
-    updated = lines[:idx] + new_lines + lines[idx:]
-    _write_text(resolved, "".join(updated), enc)
-    inserted_count = len(new_lines)
-    inserted_start = line_number + 1 if inserted_count else line_number
-    inserted_end = line_number + inserted_count
-    return (
-        f"Inserted {inserted_count} line(s) into {file_path} at lines "
-        f"{inserted_start}-{inserted_end}."
-    )
-
-
-@server.tool()
 def edit_block(
     file_path: str,
     old_string: str,
@@ -449,6 +355,8 @@ def edit_block(
     - Large-file mode does not support ignore_whitespace or normalize_escapes.
     - expected_replacements enforces exact match count; mismatch triggers rollback.
     - expected_mtime protects against concurrent edits.
+    - file_path must be absolute and within allowed directories.
+    - old_string is the literal search text; new_string is the replacement text.
     """
     enc = _normalize_encoding_required(encoding)
     resolved = _validate_path(file_path)
@@ -458,40 +366,33 @@ def edit_block(
     if meta.get("isBinary") or meta.get("isImage"):
         raise RuntimeError("Cannot edit binary or image files with edit_block.")
 
-    size = int(meta.get("size", stats.st_size))
+    size_value = meta.get("size")
+    if isinstance(size_value, (int, float)):
+        size = int(size_value)
+    else:
+        size = int(stats.st_size)
     threshold = FILE_SIZE_LIMITS.get("LARGE_FILE_THRESHOLD", 10 * 1024 * 1024)
 
     if size > threshold:
         if ignore_whitespace or normalize_escapes:
             raise RuntimeError(
-@server.tool()
-def stream_replace(
-    file_path: str,
-    search_string: str,
-    replace_string: str,
-    expected_replacements: int | None = None,
-    expected_mtime: float | None = None,
-    encoding: str = "utf-8",
-    chunk_size: int = 8192,
-) -> str:
-    """
-    Streaming, chunked literal replacement for very large files to avoid loading the whole file.
-    - If expected_replacements is None, count is not enforced; otherwise mismatch triggers rollback.
-    - chunk_size controls per-read size (default 8KB).
-    - Advanced use: edit_block will auto-select this for large files; call directly only when you need
-      custom chunk_size or explicit streaming.
-    """
-    enc = _normalize_encoding_required(encoding, "utf-8")
-    replaced = fs_tools.stream_replace(
+                "Large-file mode only supports strict literal replacement. "
+                "Disable ignore_whitespace/normalize_escapes."
+            )
+        replaced = fs_tools.stream_replace(
+            file_path,
+            old_string,
+            new_string,
+            expected_replacements=expected_replacements,
+            expected_mtime=expected_mtime,
+            encoding=enc,
+        )
+        fs_tools._invalidate_file_cache(str(resolved))
+        return f"stream_replace completed with {replaced} replacement(s) in {file_path}."
+
+    result = edit_tools.perform_search_replace(
         file_path,
-        search_string,
-        replace_string,
-        expected_replacements=expected_replacements,
-        expected_mtime=expected_mtime,
-        encoding=enc,
-        chunk_size=chunk_size,
-    )
-    return f"stream_replace completed with {replaced} replacement(s) in {file_path}."
+        old_string,
         new_string,
         expected_replacements=expected_replacements,
         expected_mtime=expected_mtime,
@@ -501,35 +402,6 @@ def stream_replace(
     )
     fs_tools._invalidate_file_cache(str(resolved))
     return result
-
-
-@server.tool()
-def stream_replace(
-    file_path: str,
-    search_string: str,
-    replace_string: str,
-    expected_replacements: int | None = None,
-    expected_mtime: float | None = None,
-    encoding: str = "utf-8",
-    chunk_size: int = 8192,
-) -> str:
-    """
-    Streaming, chunked literal replacement for very large files to avoid loading the whole file.
-    - If expected_replacements is None, count is not enforced; otherwise mismatch triggers rollback.
-    - chunk_size controls per-read size (default 8KB).
-    """
-    enc = _normalize_encoding_required(encoding, "utf-8")
-    replaced = fs_tools.stream_replace(
-        file_path,
-        search_string,
-        replace_string,
-        expected_replacements=expected_replacements,
-        expected_mtime=expected_mtime,
-        encoding=enc,
-        chunk_size=chunk_size,
-    )
-    return f"stream_replace completed with {replaced} replacement(s) in {file_path}."
-
 
 @server.tool()
 def convert_file_encoding(
