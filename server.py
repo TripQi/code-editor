@@ -60,18 +60,24 @@ def _read_text(file_path: Path, encoding: str) -> str:
 
 
 def _normalize_encoding(encoding: str | None) -> str | None:
-    if encoding is None or encoding == "":
+    if encoding is None:
         return None
-    return fs_tools.normalize_encoding(encoding)
+    normalized = encoding.strip()
+    if normalized == "" or normalized.lower() == "auto":
+        return None
+    return fs_tools.normalize_encoding(normalized)
 
 
 def _normalize_encoding_required(encoding: str | None, default: str = "utf-8") -> str:
     """
     For tool handlers that require a concrete encoding, fallback to default when None/""/auto.
     """
-    if encoding is None or encoding == "" or encoding == "auto":
+    if encoding is None:
         return fs_tools.normalize_encoding(default)
-    return fs_tools.normalize_encoding(encoding)
+    normalized = encoding.strip()
+    if normalized == "" or normalized.lower() == "auto":
+        return fs_tools.normalize_encoding(default)
+    return fs_tools.normalize_encoding(normalized)
 
 
 def _normalize_expected_mtime(expected: float | int | None) -> int | None:
