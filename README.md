@@ -8,6 +8,9 @@
 # 安装（pip 或 uv 均可，包名 code-editor-mcp）
 pip install code-editor-mcp         # 或 uv pip install code-editor-mcp
 
+# 更新最新版
+pip install -U code-editor-mcp
+
 # 直接启动 CLI 入口
 code-editor
 
