@@ -144,12 +144,10 @@ def _is_directory_empty(resolved: Path) -> bool:
 @server.tool()
 def set_root_path(root_path: str) -> str:
     """
-    Add/activate an allowed directory whitelist entry.
+    Add a directory to the allowed whitelist.
 
-    Notes:
-    - Call list_allowed_roots first; if the target is already listed you may skip set_root_path.
-    - Path must be absolute, exist, and be a directory; otherwise raises FileNotFoundError/NotADirectoryError.
-    - Access control is enforced by the allowed directory list; paths are not rewritten or resolved against this root.
+    Args:
+        root_path: Absolute path to an existing directory.
     """
     global ROOT
     ROOT = fs_tools.set_root_path(root_path)
@@ -159,10 +157,10 @@ def set_root_path(root_path: str) -> str:
 @server.tool()
 def get_file_info(file_path: str) -> dict:
     """
-    Get stat info for a path.
-    - Includes size/timestamps/permissions; for small text files includes lineCount and appendPosition.
-    - Works on files or directories; auto-switches root if allowed.
-    - file_path must be absolute and within allowed directories.
+    Get metadata for a file or directory.
+
+    Args:
+        file_path: Absolute path to the target.
     """
     return fs_tools.get_file_info(file_path)
 
@@ -170,10 +168,7 @@ def get_file_info(file_path: str) -> dict:
 @server.tool()
 def list_allowed_roots() -> list[str]:
     """
-    Return the current whitelist of allowed roots (normalized absolute paths).
-
-    Use this before cross-root operations to decide whether you must call set_root_path
-    explicitly. Paths not in this list will be rejected until added via set_root_path.
+    Return the current whitelist of allowed directories.
     """
     return [str(p) for p in fs_tools.list_allowed_roots()]
 
@@ -186,16 +181,32 @@ def read_file(
     encoding: str | None = None,
 ) -> dict:
     """
-    Read a file (text or image) with streaming behavior.
+    Read file content with optional line range.
 
-    - offset < 0 reads last |offset| lines; offset >= 0 reads from that line.
-    - length is max lines to return; omit for default limit (clamped by CODE_EDIT_FILE_READ_LINE_LIMIT).
-    - Paths must be absolute and within the allowed directories list (managed via set_root_path whitelist).
-    - encoding: None/""/\"auto\" will trigger auto-detect; otherwise supports utf-8/gbk/gb2312.
-    Common mistakes: passing URLs, non-integer offsets/length, unsupported encodings, or paths outside the allowed directories.
+    Args:
+        file_path: Absolute path to the file.
+        offset: Start line (negative reads from end).
+        length: Max lines to return.
+        encoding: File encoding (auto-detected if omitted).
     """
     enc = _normalize_encoding(encoding)
     return fs_tools.read_file(file_path, offset, length, encoding=enc)
+
+
+@server.tool()
+def read_files(
+    file_paths: List[str],
+    encoding: str | None = None,
+) -> list[dict]:
+    """
+    Read multiple files in a single call.
+
+    Args:
+        file_paths: List of absolute file paths.
+        encoding: File encoding (auto-detected if omitted).
+    """
+    enc = _normalize_encoding(encoding)
+    return fs_tools.read_multiple_files(file_paths, encoding=enc or "utf-8")
 
 
 @server.tool()
@@ -211,14 +222,18 @@ def dir_ops(
     allow_nonempty: bool | None = None,
 ) -> list | str:
     """
-    Unified directory operations.
+    Directory operations: create, list, or delete.
 
-    - action: "create" | "list" | "delete"
-    - create: requires dir_path (absolute, allowed); other params are ignored
-    - list: uses depth/format/ignore_patterns/max_items
-    - delete: requires expected_mtime, confirm_token, allow_nonempty (explicit)
-      confirm_token must equal "delete:<normalized_abs_path>"
-      normalized_abs_path = os.path.normcase(str(Path(dir_path).resolve()))
+    Args:
+        action: "create" | "list" | "delete"
+        dir_path: Absolute path to the directory.
+        depth: Listing depth (list only).
+        format: "tree" | "flat" (list only).
+        ignore_patterns: Glob patterns to exclude (list only).
+        max_items: Max entries for flat listing.
+        expected_mtime: Required for delete (conflict detection).
+        confirm_token: Required for delete ("delete:<normalized_path>").
+        allow_nonempty: Required for delete (explicit bool).
     """
     if not isinstance(action, str):
         raise ValueError("action must be a string.")
@@ -346,16 +361,16 @@ def file_ops(
     encoding: str = "utf-8",
 ) -> str:
     """
-    Unified file operations.
-    - action: "write" | "append" | "copy" | "move" | "delete"
-    - write/append: requires file_path + content (encoding applies)
-    - copy/move: requires source_path + destination_path
-    - delete: requires file_path
-    - All paths must be absolute and within allowed directories.
-    - "write" overwrites the file; "append" adds to the end.
-    - encoding is only used for write/append.
-    - expected_mtime applies to the target file for write/append/delete, and the source file for copy/move.
-    - copy requires a file source and a destination that does not exist; delete only supports files.
+    File operations: write, append, copy, move, or delete.
+
+    Args:
+        action: "write" | "append" | "copy" | "move" | "delete"
+        file_path: Target path (write/append/delete).
+        content: File content (write/append).
+        source_path: Source path (copy/move).
+        destination_path: Destination path (copy/move).
+        expected_mtime: Conflict detection timestamp.
+        encoding: Text encoding (write/append only).
     """
     if not isinstance(action, str):
         raise ValueError("action must be a string.")
@@ -417,15 +432,19 @@ def edit_block(
     ignore_whitespace: bool = False,
     normalize_escapes: bool = False,
     encoding: str = "utf-8",
-) -> str:
+) -> dict:
     """
-    Precise search/replace with line-ending normalization and optimistic lock.
-    - Automatically streams large files (>LARGE_FILE_THRESHOLD) for strict literal replacement.
-    - Large-file mode does not support ignore_whitespace or normalize_escapes.
-    - expected_replacements enforces exact match count; mismatch triggers rollback.
-    - expected_mtime protects against concurrent edits.
-    - file_path must be absolute and within allowed directories.
-    - old_string is the literal search text; new_string is the replacement text.
+    Search and replace text in a file.
+
+    Args:
+        file_path: Absolute path to the file.
+        old_string: Text to find.
+        new_string: Replacement text.
+        expected_replacements: Required match count (default 1).
+        expected_mtime: Conflict detection timestamp.
+        ignore_whitespace: Match with flexible whitespace.
+        normalize_escapes: Unescape \\n, \\t, etc. in search.
+        encoding: File encoding.
     """
     enc = _normalize_encoding_required(encoding)
     resolved = _validate_path(file_path)
@@ -448,7 +467,7 @@ def edit_block(
                 "Large-file mode only supports strict literal replacement. "
                 "Disable ignore_whitespace/normalize_escapes."
             )
-        replaced = fs_tools.stream_replace(
+        result = fs_tools.stream_replace(
             file_path,
             old_string,
             new_string,
@@ -457,7 +476,7 @@ def edit_block(
             encoding=enc,
         )
         fs_tools._invalidate_file_cache(str(resolved))
-        return f"stream_replace completed with {replaced} replacement(s) in {file_path}."
+        return result
 
     result = edit_tools.perform_search_replace(
         file_path,
@@ -472,6 +491,168 @@ def edit_block(
     fs_tools._invalidate_file_cache(str(resolved))
     return result
 
+
+@server.tool()
+def edit_blocks(
+    edits: List[dict],
+    error_policy: str = "fail-fast",
+    encoding: str = "utf-8",
+) -> dict:
+    """
+    Apply multiple search/replace edits in a single call.
+
+    Args:
+        edits: List of edit specs, each with:
+            - file_path: Absolute path
+            - old_string: Text to find
+            - new_string: Replacement text
+            - expected_replacements: Match count (default 1)
+            - ignore_whitespace: Flexible whitespace (default False)
+            - normalize_escapes: Unescape \\n, \\t (default False)
+        error_policy: "fail-fast" | "continue" | "rollback"
+        encoding: File encoding for all edits.
+    """
+    if not isinstance(edits, list) or len(edits) == 0:
+        raise ValueError("edits must be a non-empty list of edit specifications.")
+
+    policy = error_policy.lower()
+    if policy not in {"fail-fast", "continue", "rollback"}:
+        raise ValueError("error_policy must be one of: fail-fast, continue, rollback.")
+
+    enc = _normalize_encoding_required(encoding)
+
+    # Group edits by file for sequential processing
+    from collections import defaultdict
+    edits_by_file: dict = defaultdict(list)
+    for idx, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            raise ValueError(f"Edit at index {idx} must be a dict.")
+        file_path = edit.get("file_path")
+        if not file_path or not isinstance(file_path, str):
+            raise ValueError(f"Edit at index {idx} missing valid file_path.")
+        edits_by_file[file_path].append((idx, edit))
+
+    results: list = [None] * len(edits)  # Preserve original order
+    backups: dict = {}  # file_path -> original content (for rollback)
+    successful = 0
+    failed = 0
+
+    try:
+        for file_path, file_edits in edits_by_file.items():
+            resolved = _validate_path(file_path)
+
+            # Check file size limit
+            file_size = resolved.stat().st_size
+            max_bytes = FILE_SIZE_LIMITS.get("LARGE_FILE_THRESHOLD", 10 * 1024 * 1024)
+            if file_size > max_bytes:
+                raise RuntimeError(
+                    f"File {file_path} too large for edit_blocks: {file_size} bytes (limit {max_bytes} bytes). "
+                    "Use edit_block for large files or split the file."
+                )
+
+            # Read file once for all edits to this file
+            content = fs_tools.read_file_internal(str(resolved), 0, 1 << 30, encoding=enc)
+
+            if policy == "rollback":
+                backups[file_path] = content
+
+            # Apply edits sequentially, tracking cumulative changes
+            current_content = content
+
+            for idx, edit in file_edits:
+                try:
+                    old_string = edit.get("old_string", "")
+                    new_string = edit.get("new_string", "")
+                    expected_reps = edit.get("expected_replacements", 1)
+                    ignore_ws = edit.get("ignore_whitespace", False)
+                    norm_esc = edit.get("normalize_escapes", False)
+
+                    if not old_string:
+                        raise ValueError("old_string cannot be empty.")
+
+                    # Perform the edit on current_content (in-memory)
+                    edit_result = edit_tools.perform_single_edit_in_memory(
+                        current_content,
+                        old_string,
+                        new_string,
+                        expected_reps,
+                        ignore_ws,
+                        norm_esc,
+                        file_path,
+                    )
+
+                    current_content = edit_result["new_content"]
+                    results[idx] = {
+                        "status": "success",
+                        "message": edit_result["message"],
+                        "file_path": file_path,
+                        "replacements": edit_result["replacements"],
+                        "locations": edit_result["locations"],
+                    }
+                    successful += 1
+
+                except Exception as e:
+                    failed += 1
+                    results[idx] = {
+                        "status": "error",
+                        "file_path": file_path,
+                        "error": str(e),
+                    }
+
+                    if policy == "fail-fast":
+                        # Write what we have so far for this file
+                        if current_content != content:
+                            fs_tools.write_file(file_path, current_content, mode="rewrite", encoding=enc)
+                            fs_tools._invalidate_file_cache(str(resolved))
+
+                        return {
+                            "status": "partial",
+                            "message": f"Stopped at edit {idx}: {e}",
+                            "total_edits": len(edits),
+                            "successful_edits": successful,
+                            "failed_edits": failed,
+                            "results": [r for r in results if r is not None],
+                        }
+
+                    elif policy == "rollback":
+                        raise  # Will be caught by outer try/except
+
+            # Write final content for this file
+            if current_content != content:
+                fs_tools.write_file(file_path, current_content, mode="rewrite", encoding=enc)
+                fs_tools._invalidate_file_cache(str(resolved))
+
+        status = "success" if failed == 0 else "partial"
+        return {
+            "status": status,
+            "message": f"Completed {successful}/{len(edits)} edits",
+            "total_edits": len(edits),
+            "successful_edits": successful,
+            "failed_edits": failed,
+            "results": results,
+        }
+
+    except Exception as e:
+        if policy == "rollback":
+            # Restore all backed-up files
+            for file_path, original_content in backups.items():
+                try:
+                    fs_tools.write_file(file_path, original_content, mode="rewrite", encoding=enc)
+                    fs_tools._invalidate_file_cache(file_path)
+                except Exception:
+                    pass  # Best effort rollback
+
+            return {
+                "status": "error",
+                "message": f"Rolled back all changes due to error: {e}",
+                "total_edits": len(edits),
+                "successful_edits": 0,
+                "failed_edits": failed,
+                "results": [r for r in results if r is not None],
+            }
+        raise
+
+
 @server.tool()
 def convert_file_encoding(
     file_paths: List[str],
@@ -481,11 +662,14 @@ def convert_file_encoding(
     mismatch_policy: str = "warn-skip",
 ) -> list[dict]:
     """
-    Convert one or more text files from source_encoding to target_encoding in-place.
-    - file_paths must be absolute paths within allowed directories (set_root_path manages whitelist).
-    - Supported encodings: utf-8, gbk, gb2312.
-    - error_handling: 'strict' | 'replace' | 'ignore'; applied to both read and write.
-    - mismatch_policy: 'warn-skip' (default), 'fail-fast', 'force'.
+    Convert files between encodings (utf-8, gbk, gb2312).
+
+    Args:
+        file_paths: List of absolute file paths.
+        source_encoding: Current encoding.
+        target_encoding: Desired encoding.
+        error_handling: "strict" | "replace" | "ignore"
+        mismatch_policy: "warn-skip" | "fail-fast" | "force"
     """
     err = error_handling.lower()
     if err not in {"strict", "replace", "ignore"}:

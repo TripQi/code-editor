@@ -723,7 +723,7 @@ def stream_replace(
     expected_mtime: float | None = None,
     encoding: str = "utf-8",
     chunk_size: int = 8192,
-) -> int:
+) -> dict:
     """
     Streaming, chunked literal replacement for very large files without loading the whole file into memory.
 
@@ -738,7 +738,7 @@ def stream_replace(
     if not valid_path.is_file():
         raise IsADirectoryError(f"Not a file: {file_path}")
 
-    return _apply_stream_replace(
+    replaced = _apply_stream_replace(
         valid_path,
         search,
         replace,
@@ -747,6 +747,13 @@ def stream_replace(
         encoding=encoding,
         chunk_size=chunk_size,
     )
+
+    return {
+        "status": "success",
+        "message": f"stream_replace completed with {replaced} replacement(s) in {file_path}",
+        "file_path": str(valid_path),
+        "replacements": replaced,
+    }
 
 
 def read_multiple_files(paths: List[str], encoding: str = "utf-8") -> List[FileResult]:

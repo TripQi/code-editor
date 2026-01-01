@@ -49,6 +49,43 @@ class FuzzyMatchResult(TypedDict):
     similarity: float
 
 
+class EditLocation(TypedDict):
+    """Location of a single edit within a file."""
+    start_line: int
+    end_line: int
+    start_col: int
+    end_col: int
+
+
+class EditResult(TypedDict):
+    """Structured result from edit operations."""
+    status: str  # "success" | "error"
+    message: str
+    file_path: str
+    replacements: int
+    locations: list  # List[EditLocation]
+
+
+def _index_to_line_col(text: str, index: int) -> tuple[int, int]:
+    """Convert character index to 1-based (line, column)."""
+    line = text.count("\n", 0, index) + 1
+    last_newline = text.rfind("\n", 0, index)
+    column = index - last_newline
+    return line, column
+
+
+def _compute_edit_location(content: str, start_idx: int, end_idx: int) -> EditLocation:
+    """Compute line/column location for an edit span."""
+    start_line, start_col = _index_to_line_col(content, start_idx)
+    end_line, end_col = _index_to_line_col(content, end_idx)
+    return EditLocation(
+        start_line=start_line,
+        end_line=end_line,
+        start_col=start_col,
+        end_col=end_col,
+    )
+
+
 def _best_fuzzy_match(content: str, needle: str) -> FuzzyMatchResult:
     if not content or not needle:
         return {"value": "", "similarity": 0.0}
@@ -108,7 +145,7 @@ def perform_search_replace(
     ignore_whitespace: bool = False,
     normalize_escapes: bool = False,
     encoding: str = "utf-8",
-) -> str:
+) -> EditResult:
     if search == "":
         raise ValueError("Empty search strings are not allowed. Please provide a non-empty string to search for.")
 
@@ -145,18 +182,43 @@ def perform_search_replace(
                 "Adjust expected_replacements or make the search string more specific."
             )
 
+        locations: list = []  # List[EditLocation]
+
         if expected_replacements == 1:
             idx = content.index(normalized_search)
+            end_idx = idx + len(normalized_search)
+            locations.append(_compute_edit_location(content, idx, end_idx))
             new_content = (
                 content[:idx]
                 + normalize_line_endings(replace, line_ending)
-                + content[idx + len(normalized_search) :]
+                + content[end_idx:]
             )
         else:
+            # Multiple replacements - find all positions before replacing
+            search_start = 0
+            for _ in range(expected_replacements):
+                idx = content.index(normalized_search, search_start)
+                end_idx = idx + len(normalized_search)
+                locations.append(_compute_edit_location(content, idx, end_idx))
+                search_start = end_idx
             new_content = content.replace(normalized_search, normalize_line_endings(replace, line_ending))
 
         write_file(str(valid_path), new_content, mode="rewrite", expected_mtime=expected_mtime, encoding=enc)
-        return f"Successfully applied {expected_replacements} edit(s) to {file_path}{warning}"
+
+        # Build location summary for message
+        loc_summary = ", ".join(
+            f"lines {loc['start_line']}-{loc['end_line']}" if loc['start_line'] != loc['end_line']
+            else f"line {loc['start_line']}"
+            for loc in locations
+        )
+
+        return EditResult(
+            status="success",
+            message=f"Applied {expected_replacements} edit(s) to {file_path} ({loc_summary}){warning}",
+            file_path=str(valid_path),
+            replacements=expected_replacements,
+            locations=locations,
+        )
 
     # Whitespace-insensitive exact match path (optional)
     if ignore_whitespace:
@@ -170,6 +232,12 @@ def perform_search_replace(
                 "Adjust expected_replacements or make the search string more specific."
             )
         if match_count > 0:
+            # Collect locations from match objects
+            locations = [
+                _compute_edit_location(content, m.start(), m.end())
+                for m in matches[:expected_replacements]
+            ]
+
             replacement = normalize_line_endings(replace, line_ending)
             new_content, sub_count = re.subn(
                 pattern, replacement, content, count=expected_replacements, flags=flags
@@ -189,9 +257,20 @@ def perform_search_replace(
                     "Please retry with a more specific search string."
                 )
             write_file(str(valid_path), new_content, mode="rewrite", expected_mtime=expected_mtime, encoding=enc)
-            return (
-                f"Successfully applied {expected_replacements} edit(s) to {file_path} with whitespace-insensitive matching"
-                f"{warning}"
+
+            # Build location summary for message
+            loc_summary = ", ".join(
+                f"lines {loc['start_line']}-{loc['end_line']}" if loc['start_line'] != loc['end_line']
+                else f"line {loc['start_line']}"
+                for loc in locations
+            )
+
+            return EditResult(
+                status="success",
+                message=f"Applied {expected_replacements} edit(s) to {file_path} with whitespace-insensitive matching ({loc_summary}){warning}",
+                file_path=str(valid_path),
+                replacements=expected_replacements,
+                locations=locations,
             )
 
     # Fuzzy path
@@ -222,4 +301,129 @@ def perform_search_replace(
         f"Differences:\n{diff}\n\n"
         "If the search string includes escaped quotes/backslashes, retry with normalize_escapes=True.\n\n"
         f"Log entry: {log_path}"
+    )
+
+
+def perform_single_edit_in_memory(
+    content: str,
+    search: str,
+    replace: str,
+    expected_replacements: int = 1,
+    ignore_whitespace: bool = False,
+    normalize_escapes: bool = False,
+    file_path: str = "",
+) -> dict:
+    """
+    Perform a single edit on in-memory content.
+
+    Returns:
+        {
+            "new_content": str,
+            "message": str,
+            "replacements": int,
+            "locations": List[EditLocation],
+        }
+    """
+    if search == "":
+        raise ValueError("Empty search strings are not allowed.")
+
+    line_ending = detect_line_ending(content)
+    if normalize_escapes:
+        search = _unescape_literal(search)
+    normalized_search = normalize_line_endings(search, line_ending)
+
+    # Exact match path
+    count = content.count(normalized_search)
+    if count > 0:
+        if count != expected_replacements:
+            raise RuntimeError(
+                f"Expected {expected_replacements} occurrences but found {count}."
+            )
+
+        locations: list = []  # List[EditLocation]
+
+        if expected_replacements == 1:
+            idx = content.index(normalized_search)
+            end_idx = idx + len(normalized_search)
+            locations.append(_compute_edit_location(content, idx, end_idx))
+            new_content = (
+                content[:idx]
+                + normalize_line_endings(replace, line_ending)
+                + content[end_idx:]
+            )
+        else:
+            # Multiple replacements - find all positions before replacing
+            search_start = 0
+            for _ in range(expected_replacements):
+                idx = content.index(normalized_search, search_start)
+                end_idx = idx + len(normalized_search)
+                locations.append(_compute_edit_location(content, idx, end_idx))
+                search_start = end_idx
+            new_content = content.replace(
+                normalized_search, normalize_line_endings(replace, line_ending)
+            )
+
+        loc_summary = ", ".join(
+            f"lines {loc['start_line']}-{loc['end_line']}" if loc['start_line'] != loc['end_line']
+            else f"line {loc['start_line']}"
+            for loc in locations
+        )
+
+        return {
+            "new_content": new_content,
+            "message": f"Applied {expected_replacements} edit(s) ({loc_summary})",
+            "replacements": expected_replacements,
+            "locations": locations,
+        }
+
+    # Whitespace-insensitive path
+    if ignore_whitespace:
+        pattern = _build_whitespace_insensitive_pattern(normalized_search)
+        flags = re.MULTILINE | re.DOTALL
+        matches = list(re.finditer(pattern, content, flags))
+        match_count = len(matches)
+
+        if match_count > 0 and match_count != expected_replacements:
+            raise RuntimeError(
+                f"Expected {expected_replacements} whitespace-insensitive occurrence(s) but found {match_count}."
+            )
+
+        if match_count > 0:
+            locations = [
+                _compute_edit_location(content, m.start(), m.end())
+                for m in matches[:expected_replacements]
+            ]
+
+            replacement = normalize_line_endings(replace, line_ending)
+            new_content, sub_count = re.subn(
+                pattern, replacement, content, count=expected_replacements, flags=flags
+            )
+
+            loc_summary = ", ".join(
+                f"lines {loc['start_line']}-{loc['end_line']}" if loc['start_line'] != loc['end_line']
+                else f"line {loc['start_line']}"
+                for loc in locations
+            )
+
+            return {
+                "new_content": new_content,
+                "message": f"Applied {expected_replacements} edit(s) with whitespace-insensitive matching ({loc_summary})",
+                "replacements": expected_replacements,
+                "locations": locations,
+            }
+
+    # No match found - use fuzzy matching for error message
+    fuzzy_result = _best_fuzzy_match(content, search)
+    similarity = float(fuzzy_result["similarity"])
+    diff = _highlight_differences(search, fuzzy_result["value"])
+
+    if similarity >= FUZZY_THRESHOLD:
+        raise RuntimeError(
+            f"Exact match not found, but found similar text with {round(similarity * 100)}% similarity.\n"
+            f"Differences:\n{diff}"
+        )
+
+    raise RuntimeError(
+        f"Search content not found. Closest match: '{fuzzy_result['value']}' "
+        f"with {round(similarity * 100)}% similarity."
     )
