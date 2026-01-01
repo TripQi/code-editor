@@ -6,7 +6,7 @@ import shutil
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, cast
 
 from mcp.server.fastmcp import FastMCP
 from tools import edit as edit_tools
@@ -489,7 +489,7 @@ def edit_block(
         encoding=enc,
     )
     fs_tools._invalidate_file_cache(str(resolved))
-    return result
+    return cast(dict[str, Any], result)
 
 
 @server.tool()
