@@ -1,0 +1,6 @@
+{
+  "alwaysApprovedTools": [
+    "filesystem-read",
+    "ace-file_outline"
+  ]
+}
