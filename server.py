@@ -6,7 +6,7 @@ import shutil
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 from mcp.server.fastmcp import FastMCP
 from tools import edit as edit_tools
@@ -432,7 +432,7 @@ def edit_block(
     ignore_whitespace: bool = False,
     normalize_escapes: bool = False,
     encoding: str = "utf-8",
-) -> dict:
+) -> dict[str, Any]:
     """
     Search and replace text in a file.
 
@@ -497,7 +497,7 @@ def edit_blocks(
     edits: List[dict],
     error_policy: str = "fail-fast",
     encoding: str = "utf-8",
-) -> dict:
+) -> dict[str, Any]:
     """
     Apply multiple search/replace edits in a single call.
 
