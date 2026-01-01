@@ -187,7 +187,7 @@ def read_file(
         file_path: Absolute path to the file.
         offset: Start line (negative reads from end).
         length: Max lines to return.
-        encoding: File encoding (auto-detected if omitted).
+        encoding: "auto"/None for auto-detection, or specify: utf-8, gbk, gb2312.
     """
     enc = _normalize_encoding(encoding)
     return fs_tools.read_file(file_path, offset, length, encoding=enc)
@@ -203,7 +203,7 @@ def read_files(
 
     Args:
         file_paths: List of absolute file paths.
-        encoding: File encoding (auto-detected if omitted).
+        encoding: "auto"/None for auto-detection, or specify: utf-8, gbk, gb2312.
     """
     enc = _normalize_encoding(encoding)
     return fs_tools.read_multiple_files(file_paths, encoding=enc or "utf-8")
@@ -370,7 +370,7 @@ def file_ops(
         source_path: Source path (copy/move).
         destination_path: Destination path (copy/move).
         expected_mtime: Conflict detection timestamp.
-        encoding: Text encoding (write/append only).
+        encoding: Text encoding for write/append (utf-8, gbk, gb2312).
     """
     if not isinstance(action, str):
         raise ValueError("action must be a string.")
@@ -444,7 +444,7 @@ def edit_block(
         expected_mtime: Conflict detection timestamp.
         ignore_whitespace: Match with flexible whitespace.
         normalize_escapes: Unescape \\n, \\t, etc. in search.
-        encoding: File encoding.
+        encoding: File encoding (utf-8, gbk, gb2312).
     """
     enc = _normalize_encoding_required(encoding)
     resolved = _validate_path(file_path)
@@ -510,7 +510,7 @@ def edit_blocks(
             - ignore_whitespace: Flexible whitespace (default False)
             - normalize_escapes: Unescape \\n, \\t (default False)
         error_policy: "fail-fast" | "continue" | "rollback"
-        encoding: File encoding for all edits.
+        encoding: File encoding for all edits (utf-8, gbk, gb2312).
     """
     if not isinstance(edits, list) or len(edits) == 0:
         raise ValueError("edits must be a non-empty list of edit specifications.")
