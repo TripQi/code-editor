@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(del:*)",
+      "Bash(for:*)",
+      "Bash(do python -c \"import ast; ast.parse(open(''$file'', encoding=''utf-8'').read())\")",
+      "Bash(echo:*)",
+      "Bash(done)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

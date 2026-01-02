@@ -324,6 +324,8 @@ def _read_last_n_lines_reverse(
     encoding: str,
     include_status_message: bool,
     file_total_lines: Optional[int],
+    detected_encoding: Optional[str] = None,
+    encoding_confidence: Optional[float] = None,
 ) -> FileResult:
     position = file_path.stat().st_size
     lines: List[str] = []
@@ -348,7 +350,13 @@ def _read_last_n_lines_reverse(
     if include_status_message:
         status = _generate_status_message(len(result_lines), -n, file_total_lines, True)
         content = f"{status}\n\n{content}"
-    return {"content": content, "mimeType": mime_type, "isImage": False}
+    return {
+        "content": content,
+        "mimeType": mime_type,
+        "isImage": False,
+        "encoding": detected_encoding,
+        "encodingConfidence": encoding_confidence,
+    }
 
 
 def _read_from_end_with_readline(
@@ -358,6 +366,8 @@ def _read_from_end_with_readline(
     encoding: str,
     include_status_message: bool,
     file_total_lines: Optional[int],
+    detected_encoding: Optional[str] = None,
+    encoding_confidence: Optional[float] = None,
 ) -> FileResult:
     buffer: deque[str] = deque(maxlen=requested_lines)
     with open(file_path, "r", encoding=encoding, errors="replace") as f:
@@ -369,7 +379,13 @@ def _read_from_end_with_readline(
     if include_status_message:
         status = _generate_status_message(len(result), -requested_lines, file_total_lines, True)
         content = f"{status}\n\n{content}"
-    return {"content": content, "mimeType": mime_type, "isImage": False}
+    return {
+        "content": content,
+        "mimeType": mime_type,
+        "isImage": False,
+        "encoding": detected_encoding,
+        "encodingConfidence": encoding_confidence,
+    }
 
 
 def _read_from_start_with_readline(
@@ -380,6 +396,8 @@ def _read_from_start_with_readline(
     encoding: str,
     include_status_message: bool,
     file_total_lines: Optional[int],
+    detected_encoding: Optional[str] = None,
+    encoding_confidence: Optional[float] = None,
 ) -> FileResult:
     result: List[str] = []
     with open(file_path, "r", encoding=encoding, errors="replace") as f:
@@ -393,7 +411,13 @@ def _read_from_start_with_readline(
     if include_status_message:
         status = _generate_status_message(len(result), offset, file_total_lines, False)
         content = f"{status}\n\n{content}"
-    return {"content": content, "mimeType": mime_type, "isImage": False}
+    return {
+        "content": content,
+        "mimeType": mime_type,
+        "isImage": False,
+        "encoding": detected_encoding,
+        "encodingConfidence": encoding_confidence,
+    }
 
 
 def _read_from_estimated_position(
@@ -404,6 +428,8 @@ def _read_from_estimated_position(
     encoding: str,
     include_status_message: bool,
     file_total_lines: Optional[int],
+    detected_encoding: Optional[str] = None,
+    encoding_confidence: Optional[float] = None,
 ) -> FileResult:
     sample_lines = 0
     bytes_read = 0
@@ -416,7 +442,8 @@ def _read_from_estimated_position(
 
     if sample_lines == 0:
         return _read_from_start_with_readline(
-            file_path, offset, length, mime_type, encoding, include_status_message, file_total_lines
+            file_path, offset, length, mime_type, encoding, include_status_message, file_total_lines,
+            detected_encoding, encoding_confidence
         )
 
     avg_line_length = max(1, bytes_read // sample_lines)
@@ -439,7 +466,13 @@ def _read_from_estimated_position(
     if include_status_message:
         status = _generate_status_message(len(result), offset, file_total_lines, False)
         content = f"{status}\n\n{content}"
-    return {"content": content, "mimeType": mime_type, "isImage": False}
+    return {
+        "content": content,
+        "mimeType": mime_type,
+        "isImage": False,
+        "encoding": detected_encoding,
+        "encodingConfidence": encoding_confidence,
+    }
 
 
 def _read_file_with_smart_positioning(
@@ -449,6 +482,8 @@ def _read_file_with_smart_positioning(
     mime_type: str,
     encoding: str,
     include_status_message: bool = True,
+    detected_encoding: Optional[str] = None,
+    encoding_confidence: Optional[float] = None,
 ) -> FileResult:
     file_size = file_path.stat().st_size
     # Only count lines for small files to avoid expensive full-file scans
@@ -459,16 +494,16 @@ def _read_file_with_smart_positioning(
     if offset < 0:
         requested_lines = abs(offset)
         if file_size > FILE_SIZE_LIMITS["LARGE_FILE_THRESHOLD"] and requested_lines <= READ_PERFORMANCE_THRESHOLDS["SMALL_READ_THRESHOLD"]:
-            return _read_last_n_lines_reverse(file_path, requested_lines, mime_type, encoding, include_status_message, total_lines)
-        return _read_from_end_with_readline(file_path, requested_lines, mime_type, encoding, include_status_message, total_lines)
+            return _read_last_n_lines_reverse(file_path, requested_lines, mime_type, encoding, include_status_message, total_lines, detected_encoding, encoding_confidence)
+        return _read_from_end_with_readline(file_path, requested_lines, mime_type, encoding, include_status_message, total_lines, detected_encoding, encoding_confidence)
 
     if file_size < FILE_SIZE_LIMITS["LARGE_FILE_THRESHOLD"] or offset == 0:
-        return _read_from_start_with_readline(file_path, offset, length, mime_type, encoding, include_status_message, total_lines)
+        return _read_from_start_with_readline(file_path, offset, length, mime_type, encoding, include_status_message, total_lines, detected_encoding, encoding_confidence)
 
     if offset > READ_PERFORMANCE_THRESHOLDS["DEEP_OFFSET_THRESHOLD"]:
-        return _read_from_estimated_position(file_path, offset, length, mime_type, encoding, include_status_message, total_lines)
+        return _read_from_estimated_position(file_path, offset, length, mime_type, encoding, include_status_message, total_lines, detected_encoding, encoding_confidence)
 
-    return _read_from_start_with_readline(file_path, offset, length, mime_type, encoding, include_status_message, total_lines)
+    return _read_from_start_with_readline(file_path, offset, length, mime_type, encoding, include_status_message, total_lines, detected_encoding, encoding_confidence)
 
 
 def _read_file_from_disk(
@@ -493,6 +528,10 @@ def _read_file_from_disk(
     is_image = bool(meta.get("isImage"))
     is_binary = bool(meta.get("isBinary"))
     enc = _resolve_effective_encoding(encoding, meta.get("encoding"))  # type: ignore[arg-type]
+    
+    # Get detected encoding info from metadata
+    detected_encoding = cast(Optional[str], meta.get("encoding"))
+    encoding_confidence = cast(Optional[float], meta.get("encodingConfidence"))
 
     def _read_operation() -> FileResult:
         if is_image:
@@ -505,7 +544,9 @@ def _read_file_from_disk(
             return {"content": instructions, "mimeType": "text/plain", "isImage": False}
 
         try:
-            result = _read_file_with_smart_positioning(valid_path, offset, length, mime_type, enc, True)
+            result = _read_file_with_smart_positioning(
+                valid_path, offset, length, mime_type, enc, True, detected_encoding, encoding_confidence
+            )
             if truncated and isinstance(result.get("content"), str):
                 notice = (
                     f"[TRUNCATED] requested {requested_length} lines exceeds limit {max_length}. "
@@ -767,6 +808,8 @@ def read_multiple_files(paths: List[str], encoding: str = "utf-8") -> List[FileR
                 "content": file_result["content"],
                 "mimeType": file_result["mimeType"],
                 "isImage": file_result["isImage"],
+                "encoding": file_result.get("encoding"),
+                "encodingConfidence": file_result.get("encodingConfidence"),
             })
         except Exception as exc:  # pragma: no cover - user facing aggregation
             results.append({"path": path, "error": str(exc)})

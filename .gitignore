@@ -12,3 +12,4 @@ wheels/
 # Dir
 /plans/*
 /tests/*
+.ace-tool/
