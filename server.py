@@ -188,6 +188,14 @@ def read_file(
         offset: Start line (negative reads from end).
         length: Max lines to return.
         encoding: "auto"/None for auto-detection, or specify: utf-8, gbk, gb2312.
+
+    Returns:
+        dict with keys:
+            - content: File content as string
+            - mimeType: MIME type of the file
+            - isImage: Boolean indicating if file is an image
+            - encoding: Detected encoding (e.g., "utf_8", "gbk", "gb2312")
+            - encodingConfidence: Confidence score for encoding detection (float or None)
     """
     enc = _normalize_encoding(encoding)
     return fs_tools.read_file(file_path, offset, length, encoding=enc)
@@ -204,6 +212,16 @@ def read_files(
     Args:
         file_paths: List of absolute file paths.
         encoding: "auto"/None for auto-detection, or specify: utf-8, gbk, gb2312.
+
+    Returns:
+        list of dicts, each with keys:
+            - path: File path
+            - content: File content as string
+            - mimeType: MIME type of the file
+            - isImage: Boolean indicating if file is an image
+            - encoding: Detected encoding (e.g., "utf_8", "gbk", "gb2312")
+            - encodingConfidence: Confidence score for encoding detection (float or None)
+            - error: Error message (only present if read failed)
     """
     enc = _normalize_encoding(encoding)
     return fs_tools.read_multiple_files(file_paths, encoding=enc or "utf-8")
